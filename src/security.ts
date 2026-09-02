@@ -52,6 +52,7 @@ function maskSecret(value: string): string {
 const secretKeys = new Set([
   'lasApiKey',
   'arkApiKey',
+  'apiKey',
   'tosAccessKey',
   'tosSecretKey',
   'secretKey',

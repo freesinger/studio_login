@@ -22,5 +22,5 @@ export interface ResourceConfig {
   region?: string;
   customImageModelConfigs?: unknown;
   customLlmModelConfigs?: unknown;
+  customModels?: unknown;
 }
-

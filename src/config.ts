@@ -27,6 +27,9 @@ const envSchema = z.object({
   STUDIO_LOGIN_RECONCILE_INTERVAL_SECONDS: z.coerce.number().int().min(10).max(3600).default(300),
   STUDIO_LOGIN_RECONCILE_OLDER_THAN_MINUTES: z.coerce.number().int().min(0).max(1440).default(10),
   STUDIO_LOGIN_RECONCILE_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(20),
+  STUDIO_LOGIN_RUNNING_STALE_MINUTES: z.coerce.number().int().min(1).max(10080).default(30),
+  STUDIO_LOGIN_RECONCILE_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(3),
+  STUDIO_LOGIN_RECONCILE_BACKOFF_BASE_SECONDS: z.coerce.number().int().min(10).max(86400).default(300),
 });
 
 export type AppConfig = z.infer<typeof envSchema> & {

@@ -84,6 +84,23 @@ beforeAll(async () => {
                 requiredResourceFields: ['lasApiKey', 'arkApiKey', 'tosBucketName'],
               },
             }
+          : requestUrl === '/integration/api/v1/billing-catalog/get'
+            ? {
+                code: 200,
+                message: 'success',
+                data: {
+                  items: [
+                    {
+                      billingItemId: 'video-second', unit: 'second',
+                      operatorIds: ['video'],
+                    },
+                    {
+                      billingItemId: 'image', unit: 'count',
+                      operatorIds: ['image'],
+                    },
+                  ],
+                },
+              }
           : { code: 200, message: 'success', data: {} }));
     });
   });
@@ -149,7 +166,7 @@ describe('studio-login MVP', () => {
     expect(page.body).toContain('保存并注册');
     expect(page.body).toContain('完整的资源配置 JSON');
     expect(page.body).not.toContain('首次使用');
-    expect(page.body).not.toContain('配置组名称');
+    expect(page.body).toContain('配置组名称');
     expect(page.body).not.toContain('企业管理员注册');
     expect(page.body).not.toContain('企业标识');
     expect((await app.inject({ method: 'POST', url: '/api/public/register', payload: {} })).statusCode).toBe(404);
@@ -229,6 +246,7 @@ describe('studio-login MVP', () => {
         name: 'default',
         monthlyLimit: '1000',
         isDefault: true,
+        projectLevelSharing: true,
         resourceConfig: {
           lasBaseUrl: 'https://las.example.com',
           lasApiKey: 'las-secret',
@@ -241,10 +259,19 @@ describe('studio-login MVP', () => {
           outputTosPath: 'tos://studio-login-test/output/',
           customImageModelConfigs: [{ id: 'image-model' }],
           customLlmModelConfigs: [{ id: 'llm-model' }],
+          customModels: [{ name: 'custom-model', type: 'IMAGE' }],
         },
       },
     });
     expect(groupResponse.statusCode).toBe(200);
+    expect(studioRequestBodies).toContainEqual({
+      path: '/integration/api/v1/user-profiles/upsert',
+      body: expect.objectContaining({
+        appId: 'acc_demo',
+        projectId: 'acc_demo',
+        projectLevelSharing: true,
+      }),
+    });
     expect(studioUsageEndpointBodies).toContainEqual(expect.objectContaining({
       appId: 'acc_demo',
       estimateUrl: 'http://studio-login.test/api/studio/baseline/tasks?connection_id=acc_demo',
@@ -261,6 +288,7 @@ describe('studio-login MVP', () => {
     expect(groupList.statusCode).toBe(200);
     expect(groupList.body).toContain('las-secret');
     expect(groupList.body).toContain('ark-secret');
+    expect(groupList.json().items[0].projectLevelSharing).toBe(true);
 
     const publish = await app.inject({
       method: 'POST',
@@ -279,6 +307,7 @@ describe('studio-login MVP', () => {
         name: 'default-updated',
         resourceConfig: { arkApiKey: 'ark-secret-next' },
         monthlyLimit: '1200',
+        projectLevelSharing: true,
       },
     });
     expect(nextVersion.statusCode).toBe(200);
@@ -291,6 +320,7 @@ describe('studio-login MVP', () => {
     expect(mergedGroupList.body).toContain('acc_demo');
     expect(mergedGroupList.body).toContain('las-secret');
     expect(mergedGroupList.body).toContain('ark-secret-next');
+    expect(mergedGroupList.json().items[0].projectLevelSharing).toBe(true);
 
     const subaccount = await app.inject({
       method: 'POST',
@@ -314,6 +344,7 @@ describe('studio-login MVP', () => {
         appId: 'acc_demo',
         projectId: 'acc_demo',
         userId: 'worker',
+        projectLevelSharing: true,
         lasBaseUrl: 'https://las.example.com',
         tosBucketName: 'studio-login-test',
         tosAccessKey: 'tos-access-secret',
@@ -323,6 +354,7 @@ describe('studio-login MVP', () => {
         outputTosPath: 'tos://studio-login-test/output/',
         customImageModelConfigs: [{ id: 'image-model' }],
         customLlmModelConfigs: [{ id: 'llm-model' }],
+        customModels: [{ name: 'custom-model', type: 'IMAGE' }],
       }),
     });
 
@@ -340,6 +372,7 @@ describe('studio-login MVP', () => {
     });
     expect(users.body).toContain('password-123');
 
+    studioRequestBodies.length = 0;
     const updatedUser = await app.inject({
       method: 'PATCH',
       url: `/api/admin/subaccounts/${subaccountId}`,
@@ -353,6 +386,14 @@ describe('studio-login MVP', () => {
       },
     });
     expect(updatedUser.statusCode).toBe(200);
+    expect(studioRequestBodies).toContainEqual({
+      path: '/integration/api/v1/user-profiles/upsert',
+      body: expect.objectContaining({
+        projectId: 'acc_demo',
+        userId: 'worker',
+        projectLevelSharing: true,
+      }),
+    });
     const usersAfterPasswordUpdate = await app.inject({
       method: 'GET',
       url: '/api/admin/subaccounts?accountId=acc_demo',
@@ -387,7 +428,9 @@ describe('studio-login MVP', () => {
       url: '/api/admin/prices',
       headers: { cookie: adminCookie },
       payload: {
-        appId: 'acc_demo',
+        accountId: 'acc_demo',
+        scopeType: 'CONFIG_GROUP',
+        scopeId: configGroupId,
         billingItemId: 'video-second',
         unit: 'second',
         customerUnitPrice: '2',
@@ -397,12 +440,15 @@ describe('studio-login MVP', () => {
     expect(price.statusCode).toBe(200);
     const prices = await app.inject({
       method: 'GET',
-      url: '/api/admin/prices?appId=acc_demo',
+      url: '/api/admin/prices?accountId=acc_demo',
       headers: { cookie: adminCookie },
     });
     expect(prices.statusCode).toBe(200);
-    expect(prices.json().items[0]).toMatchObject({
-      appId: 'acc_demo',
+    expect(prices.json().items.find((item: { billingItemId: string }) =>
+      item.billingItemId === 'video-second')).toMatchObject({
+      scopeType: 'CONFIG_GROUP',
+      scopeId: configGroupId,
+      scopeName: 'acc_demo',
       billingItemId: 'video-second',
       customerUnitPrice: '2.00000000',
       costUnitPrice: '1.00000000',
@@ -445,7 +491,8 @@ describe('studio-login MVP', () => {
     expect(synchronizedGroup.statusCode).toBe(200);
     expect(synchronizedGroup.json()).toMatchObject({ synced: 2, failed: 0 });
     const synchronizedProfiles = studioRequestBodies
-      .filter(request => request.path === '/integration/api/v1/user-profiles/upsert');
+      .filter(request => request.path === '/integration/api/v1/user-profiles/upsert'
+        && request.body.userId);
     expect(synchronizedProfiles).toHaveLength(2);
     expect(synchronizedProfiles.map(request => request.body.userId).sort())
       .toEqual(['worker', 'worker2']);
@@ -453,6 +500,7 @@ describe('studio-login MVP', () => {
       lasApiKey: 'las-secret-next',
       arkApiKey: 'ark-secret-final',
       tosBucketName: 'studio-login-test-next',
+      projectLevelSharing: true,
     }));
 
     const priceImport = await app.inject({
@@ -461,7 +509,7 @@ describe('studio-login MVP', () => {
       headers: { cookie: adminCookie },
       payload: {
         accountId: 'acc_demo',
-        csv: 'billingItemId,unit,customerUnitPrice,costUnitPrice,platformDefault\nimage,count,3,1.5,false\n',
+        csv: `billingItemId,unit,configGroup,customerUnitPrice,costUnitPrice\nimage,count,${configGroupId},3,1.5\n`,
       },
     });
     expect(priceImport.statusCode).toBe(200);

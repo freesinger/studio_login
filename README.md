@@ -8,6 +8,8 @@ Studio 企业登录、资源配置和后付费接入服务。使用 TypeScript�
 2. 创建或校准环境变量指定的 `SYSTEM_ADMIN`。
 3. 启动 HTTP 服务，不依赖尚未分配的公网地址。
 
+Schema 使用 `sql/schema/NNN_*.sql` 增量迁移；已上线的迁移文件不再修改，结构变更必须新增下一个版本，服务启动时会按文件名顺序自动执行未应用版本。
+
 管理员登录后，在“Studio 服务连接”中填写 Studio 和 Login 的公网地址并注册 Ticket 回调；资源配置组发布时再用该组真实 LAS API Key 注册用量回调。Integration Token、数据库密码和管理员密码仍只从服务端配置读取，不会在页面展示或提交。子账号登录成功后使用一次性 Ticket 直接进入 Studio。
 
 资源配置组只要求 `lasApiKey`、`arkApiKey` 和 `tosBucketName`，地域由 Studio 查询返回，LAS 服务地址由 Studio 服务端配置注入。配置组保存后立即生效，内部版本仅用于审计；子账号支持修改显示名称、密码、配置组和账期限额，账单支持整体、配置组、子账号三种汇总维度。
