@@ -5,6 +5,8 @@ const state = {
   groups: [],
   users: [],
   prices: [],
+  billingCatalog: [],
+  modelPage: 1,
 };
 
 const sectionTitles = {
@@ -12,6 +14,7 @@ const sectionTitles = {
   configs: '资源配置组',
   users: '企业子账号',
   prices: '价格配置',
+  models: '模型统计',
   bills: '账单',
 };
 
@@ -36,6 +39,27 @@ const manualResourceFieldNames = [
   'lasApiKey',
   'arkApiKey',
   'tosBucketName',
+];
+
+const customModelFieldNames = [
+  'customImageModelConfigs',
+  'customLlmModelConfigs',
+  'customModels',
+];
+
+const optionalResourceFieldNames = [
+  'lasBaseUrl',
+  'tosAccessKey',
+  'tosSecretKey',
+  'tosUploadPrefix',
+  'tosEndpoint',
+  'outputTosPath',
+];
+
+const resourceFieldNames = [
+  ...manualResourceFieldNames,
+  ...optionalResourceFieldNames,
+  ...customModelFieldNames,
 ];
 
 const defaultStudioBaseUrl = 'https://laslas.cloud';
@@ -94,6 +118,26 @@ function badge(status) {
   return `<span class="badge ${className}">${escapeHtml(statusLabels[status] || status)}</span>`;
 }
 
+function formatBeijingDateTime(value) {
+  if (!value) return '';
+  return new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+}
+
+function modelStatusCell(item) {
+  const runningMinutes = Number(item.runningMinutes || 0);
+  if (item.status !== 'RUNNING') return badge(item.status);
+  const reconcileStatus = item.lastReconcileStatus ? String(item.lastReconcileStatus) : '';
+  const stale = runningMinutes >= 30;
+  const diagnostics = [];
+  if (stale) diagnostics.push(`已执行 ${runningMinutes} 分钟，超过 30 分钟未收到 Studio 终态回调`);
+  if (reconcileStatus) diagnostics.push(`最近补偿查询：${reconcileStatus}`);
+  if (item.reconcileAttempts) diagnostics.push(`补偿次数：${item.reconcileAttempts}`);
+  if (item.lastReconcileAt) diagnostics.push(`查询时间：${formatBeijingDateTime(item.lastReconcileAt)}`);
+  if (item.nextReconcileAt) diagnostics.push(`下次查询：${formatBeijingDateTime(item.nextReconcileAt)}`);
+  if (diagnostics.length === 0) return badge(item.status);
+  return `<div class="cell-title"><span class="badge warning">${stale ? '执行中超时' : '执行中'}</span><span>${escapeHtml(diagnostics.join('；'))}</span></div>`;
+}
+
 function currentPeriod() {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Shanghai',
@@ -106,7 +150,7 @@ function currentPeriod() {
 function formatMoney(value) {
   const parsed = Number(value || 0);
   return Number.isFinite(parsed)
-    ? parsed.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 6 })
+    ? parsed.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
     : '0.00';
 }
 
@@ -134,17 +178,27 @@ function showAdmin(actor) {
   setText('#actor-avatar', (actor.displayName || actor.loginName || 'A').slice(0, 1).toUpperCase());
   setText('#account-name', actor.accountId);
   $('#bill-period').value = currentPeriod();
+  const today = new Date();
+  const weekAgo = new Date(today.getTime() - 6 * 86_400_000);
+  $('#model-end-date').value = today.toLocaleDateString('en-CA');
+  $('#model-start-date').value = weekAgo.toLocaleDateString('en-CA');
   if (actor.role !== 'SYSTEM_ADMIN') {
     $$('.system-admin-only').forEach(node => node.classList.add('hidden'));
   }
 }
 
 async function loadAdminData() {
-  const loaders = [loadConnections(), loadConfigGroups(), loadUsers(), loadBills(currentPeriod())];
-  if (state.actor.role === 'SYSTEM_ADMIN') loaders.push(loadPrices());
-  const results = await Promise.allSettled(loaders);
+  const results = await Promise.allSettled([
+    loadConnections(),
+    loadConfigGroups(),
+    loadUsers(),
+    loadBills(currentPeriod()),
+  ]);
   const failed = results.find(result => result.status === 'rejected');
   if (failed) toast(failed.reason.message, true);
+  if (state.actor.role === 'SYSTEM_ADMIN' && results[1].status === 'fulfilled') {
+    await loadPrices().catch(error => toast(error.message, true));
+  }
 }
 
 async function loadConnections() {
@@ -256,6 +310,9 @@ async function loadConfigGroups() {
   setText('#stat-groups', state.groups.length);
   setText('#stat-groups-note', `${state.groups.filter(group => ['AVAILABLE', 'PARTIAL_FAILED'].includes(group.status)).length} 个可分配`);
   refreshGroupSelect();
+  refreshPriceScopeFilter();
+  $('#model-config-group').innerHTML = '<option value="">全部</option>' + state.groups
+    .map(group => `<option value="${escapeHtml(group.configGroupId)}">${escapeHtml(group.projectId)}</option>`).join('');
 }
 
 function renderConfigGroups() {
@@ -268,6 +325,13 @@ function renderConfigGroups() {
     const config = group.config || {};
     const secretCount = ['lasApiKey', 'arkApiKey', 'tosAccessKey', 'tosSecretKey']
       .filter(key => Boolean(config[key])).length;
+    const quota = group.quota || {};
+    const limit = quota.limit === null || quota.limit === undefined
+      ? '不限额'
+      : `${formatMoney(quota.limit)} CNY`;
+    const available = quota.availableAmount === null || quota.availableAmount === undefined
+      ? '不限额'
+      : `${formatMoney(quota.availableAmount)} CNY`;
     return `<article class="config-card">
       <div class="config-card-header">
         <div class="config-card-title"><h3>${escapeHtml(group.projectId)}</h3>${group.isDefault ? '<span class="badge neutral">默认</span>' : ''}${badge(group.status)}</div>
@@ -282,7 +346,11 @@ function renderConfigGroups() {
         <div><span>Studio 连接</span><strong>${escapeHtml(group.connectionName || group.appId || '未配置')}</strong></div>
         <div><span>区域</span><strong>${escapeHtml(config.region || config.tosRegion || '未配置')}</strong></div>
         <div><span>资源凭证</span><strong>${secretCount > 0 ? `已配置 ${secretCount} 项` : '未配置'}</strong></div>
-        <div><span>账期硬上限</span><strong>${group.monthlyLimit ? `${escapeHtml(formatMoney(group.monthlyLimit))} CNY` : '不限额'}</strong></div>
+        <div><span>${escapeHtml(group.billingPeriod || currentPeriod())} 月度共享上限</span><strong>${escapeHtml(limit)}</strong></div>
+        <div><span>本月已结算</span><strong>${escapeHtml(formatMoney(quota.actualAmount || 0))} CNY</strong></div>
+        <div><span>执行中预冻结</span><strong>${escapeHtml(formatMoney(quota.reservedAmount || 0))} CNY</strong></div>
+        <div><span>当前可用额度</span><strong>${escapeHtml(available)}</strong></div>
+        <div><span>数据共享</span><strong>${group.projectLevelSharing ? '已开启' : '未开启'}</strong></div>
       </div>
       ${group.failedUsers?.length ? `<div class="sync-errors">${group.failedUsers.map(user => `<div><strong>${escapeHtml(user.loginName)}</strong><span>${escapeHtml(user.errorCode || 'PROFILE_SYNC_FAILED')} · ${escapeHtml(user.errorMessage || '同步失败')}${user.requestId ? ` · Request ID: ${escapeHtml(user.requestId)}` : ''}</span></div>`).join('')}</div>` : ''}
     </article>`;
@@ -295,6 +363,57 @@ function refreshGroupSelect() {
   select.innerHTML = available.length
     ? available.map(group => `<option value="${escapeHtml(group.configGroupId)}" ${group.isDefault ? 'selected' : ''}>${escapeHtml(group.projectId)}${group.isDefault ? '（默认）' : ''}</option>`).join('')
     : '<option value="">请先创建一个可用配置组</option>';
+  refreshPriceScopeSelect();
+}
+
+function refreshPriceScopeSelect(selectedScopeId = '') {
+  const select = $('#price-scope');
+  if (!select) return;
+  const groups = state.groups.filter(group => group.status !== 'DELETED');
+  select.innerHTML = `${groups.map(group =>
+    `<option value="${escapeHtml(group.configGroupId)}">${escapeHtml(group.projectId)}</option>`).join('')}
+    <option value="*">平台默认（兜底）</option>`;
+  const defaultGroup = groups.find(group => group.isDefault) || groups[0];
+  select.value = selectedScopeId || defaultGroup?.configGroupId || '*';
+}
+
+function refreshPriceScopeFilter() {
+  const select = $('#price-scope-filter');
+  if (!select) return;
+  const current = select.value;
+  const groups = state.groups.filter(group => group.status !== 'DELETED');
+  select.innerHTML = `${groups.map(group =>
+    `<option value="${escapeHtml(group.configGroupId)}">${escapeHtml(group.projectId)}</option>`).join('')}
+    <option value="*">平台默认（兜底）</option>`;
+  const defaultGroup = groups.find(group => group.isDefault) || groups[0];
+  const keepCurrent = groups.some(group => group.configGroupId === current)
+    || (current === '*' && select.dataset.userSelected === 'true');
+  select.value = keepCurrent
+    ? current
+    : defaultGroup?.configGroupId || '*';
+}
+
+function selectedGroup() {
+  const configGroupId = $('#user-config-group').value;
+  return state.groups.find(group => group.configGroupId === configGroupId);
+}
+
+function updateUserLimitHelp() {
+  const group = selectedGroup();
+  if (!group) {
+    setText('#user-limit-help', '仍受所选配置组的月度共享上限约束。');
+    return;
+  }
+  const groupLimit = group.monthlyLimit
+    ? `${formatMoney(group.monthlyLimit)} CNY`
+    : '不限额';
+  const groupAvailable = group.quota?.availableAmount === null || group.quota?.availableAmount === undefined
+    ? '不限额'
+    : `${formatMoney(group.quota.availableAmount)} CNY`;
+  setText(
+    '#user-limit-help',
+    `个人上限留空时仍受配置组约束；${group.billingPeriod || currentPeriod()} 配置组上限 ${groupLimit}，当前可用 ${groupAvailable}。`,
+  );
 }
 
 function openConfigDialog(group = null) {
@@ -310,6 +429,7 @@ function openConfigDialog(group = null) {
   form.elements.projectId.readOnly = Boolean(group);
   if (group) {
     form.elements.monthlyLimit.value = group.monthlyLimit || '';
+    form.elements.projectLevelSharing.checked = Boolean(group.projectLevelSharing);
     form.elements.connectionId.value = group.connectionId || '';
     form.elements.projectId.value = group.projectId || '';
     const config = group.config || {};
@@ -317,7 +437,12 @@ function openConfigDialog(group = null) {
       if (form.elements[name] && config[name]) form.elements[name].value = config[name];
     });
     form.elements.resourceJson.value = JSON.stringify(
-      Object.fromEntries(manualResourceFieldNames.filter(name => config[name]).map(name => [name, config[name]])),
+      Object.fromEntries(resourceFieldNames.filter(name => config[name] !== undefined).map(name => [name, config[name]])),
+      null,
+      2,
+    );
+    form.elements.customModelJson.value = JSON.stringify(
+      Object.fromEntries(customModelFieldNames.filter(name => config[name] !== undefined).map(name => [name, config[name]])),
       null,
       2,
     );
@@ -338,22 +463,33 @@ function setConfigMode(mode) {
 }
 
 function resourceConfigFromForm(form) {
+  let config = {};
   if (form.dataset.mode === 'json') {
     const resourceJson = form.elements.resourceJson.value.trim();
     if (!resourceJson) throw new Error('请填写资源 JSON');
     const parsed = JSON.parse(resourceJson);
     if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('资源 JSON 必须是对象');
-    const config = {};
-    for (const name of manualResourceFieldNames) {
+    for (const name of resourceFieldNames) {
       const value = typeof parsed[name] === 'string' ? parsed[name].trim() : parsed[name];
+      if (value !== undefined && value !== null && value !== '') config[name] = value;
+    }
+  } else {
+    for (const name of manualResourceFieldNames) {
+      const value = form.elements[name].value.trim();
       if (value) config[name] = value;
     }
-    return config;
   }
-  const config = {};
-  for (const name of manualResourceFieldNames) {
-    const value = form.elements[name].value.trim();
-    if (value) config[name] = value;
+  const customJson = form.elements.customModelJson.value.trim();
+  if (customJson) {
+    const parsed = JSON.parse(customJson);
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+      throw new Error('自定义模型 JSON 必须是对象');
+    }
+    const unexpected = Object.keys(parsed).filter(name => !customModelFieldNames.includes(name));
+    if (unexpected.length > 0) throw new Error(`自定义模型 JSON 包含不支持字段：${unexpected.join('、')}`);
+    for (const name of customModelFieldNames) {
+      if (parsed[name] !== undefined) config[name] = parsed[name];
+    }
   }
   return config;
 }
@@ -392,6 +528,7 @@ async function submitConfig(event) {
     setFormMessage(form, '正在安全保存配置…');
     const resourceConfig = resourceConfigFromForm(form);
     const monthlyLimit = form.elements.monthlyLimit.value.trim() || null;
+    const projectLevelSharing = form.elements.projectLevelSharing.checked;
     const projectId = form.elements.projectId.value.trim();
     const groupId = $('#config-group-id').value;
     if (!groupId && ['lasApiKey', 'arkApiKey', 'tosBucketName'].some(name => !resourceConfig[name])) {
@@ -406,6 +543,7 @@ async function submitConfig(event) {
           projectId,
           resourceConfig,
           monthlyLimit,
+          projectLevelSharing,
         }),
       });
     } else {
@@ -418,6 +556,7 @@ async function submitConfig(event) {
           resourceConfig,
           monthlyLimit,
           isDefault: form.elements.isDefault.checked,
+          projectLevelSharing,
         }),
       });
     }
@@ -436,19 +575,52 @@ async function loadUsers() {
   renderUsers();
   setText('#stat-users', state.users.length);
   setText('#stat-users-note', `${state.users.filter(user => user.status === 'ACTIVE').length} 个正常`);
+  $('#model-user').innerHTML = '<option value="">全部</option>' + state.users
+    .map(user => `<option value="${escapeHtml(user.userId)}">${escapeHtml(user.displayName || user.loginName)}</option>`).join('');
 }
 
 function renderUsers() {
   $('#user-empty').classList.toggle('hidden', state.users.length > 0);
-  $('#user-list').innerHTML = state.users.map(user => `<tr>
-    <td><div class="cell-title"><strong>${escapeHtml(user.displayName)}</strong><span>${escapeHtml(user.userId)}</span></div></td>
-    <td>${escapeHtml(user.loginName)}</td>
-    <td>${user.password ? `<div class="inline-actions"><span class="secret-value" data-password-value>••••••••</span><button class="small-button" data-user-action="toggle-password" data-user-id="${escapeHtml(user.userId)}" type="button">查看</button></div>` : '历史账号需修改密码'}</td>
+  $('#user-list').innerHTML = state.users.map(user => {
+    const quota = user.quota || {};
+    const personalLimit = user.monthlyLimit
+      ? `${formatMoney(user.monthlyLimit)} CNY`
+      : '不设个人上限';
+    const effectiveAvailable = quota.effectiveAvailableAmount === null
+      || quota.effectiveAvailableAmount === undefined
+      ? '不限额'
+      : `${formatMoney(quota.effectiveAvailableAmount)} CNY`;
+    return `<tr>
+    <td><div class="cell-title"><strong>${escapeHtml(user.loginName)}</strong>${user.password ? `<div class="user-password"><span class="secret-value" data-password-value>••••••••</span><button class="small-button link-button" data-user-action="toggle-password" data-user-id="${escapeHtml(user.userId)}" type="button">查看密码</button></div>` : '<span>历史账号需修改密码</span>'}</div></td>
     <td>${escapeHtml(user.configGroupName || '未分配')}</td>
-    <td>${user.monthlyLimit ? `${escapeHtml(formatMoney(user.monthlyLimit))} CNY` : '不限额'}</td>
-    <td><div class="cell-title">${badge(user.status)}${user.profileSyncErrorMessage ? `<span>${escapeHtml(user.profileSyncErrorCode || 'PROFILE_SYNC_FAILED')} · ${escapeHtml(user.profileSyncErrorMessage)}${user.profileSyncRequestId ? ` · Request ID: ${escapeHtml(user.profileSyncRequestId)}` : ''}</span>` : ''}</div></td>
-    <td><div class="inline-actions"><button class="small-button" data-user-action="edit" data-user-id="${escapeHtml(user.userId)}" type="button">编辑</button>${user.profileSyncErrorMessage ? `<button class="small-button" data-user-action="retry" data-user-id="${escapeHtml(user.userId)}" type="button">重试同步</button>` : ''}${user.status === 'ACTIVE' ? `<button class="small-button danger" data-user-action="disable" data-user-id="${escapeHtml(user.userId)}" type="button">停用</button>` : user.status === 'DISABLED' ? `<button class="small-button" data-user-action="enable" data-user-id="${escapeHtml(user.userId)}" type="button">恢复</button>` : ''}<button class="small-button danger" data-user-action="delete" data-user-id="${escapeHtml(user.userId)}" type="button">删除</button></div></td>
-  </tr>`).join('');
+    <td>${escapeHtml(personalLimit)}</td>
+    <td>${escapeHtml(formatMoney(quota.actualAmount || 0))} CNY</td>
+    <td>${escapeHtml(formatMoney(quota.reservedAmount || 0))} CNY</td>
+    <td>${escapeHtml(effectiveAvailable)}</td>
+    <td><div class="cell-title user-status">${badge(user.status)}${user.profileSyncErrorMessage ? `<span>${escapeHtml(user.profileSyncErrorCode || 'PROFILE_SYNC_FAILED')} · ${escapeHtml(user.profileSyncErrorMessage)}${user.profileSyncRequestId ? ` · Request ID: ${escapeHtml(user.profileSyncRequestId)}` : ''}</span>` : ''}</div></td>
+    <td class="user-menu-cell"><button class="user-menu-trigger" data-user-menu="${escapeHtml(user.userId)}" type="button" aria-label="账号操作" aria-haspopup="menu">⋯</button></td>
+  </tr>`;
+  }).join('');
+}
+
+function closeUserActionMenu() {
+  $('#user-action-menu').classList.add('hidden');
+}
+
+function openUserActionMenu(button, user) {
+  const menu = $('#user-action-menu');
+  menu.innerHTML = `<button data-user-action="edit" data-user-id="${escapeHtml(user.userId)}" role="menuitem" type="button">编辑</button>
+    ${user.profileSyncErrorMessage ? `<button data-user-action="retry" data-user-id="${escapeHtml(user.userId)}" role="menuitem" type="button">重试同步</button>` : ''}
+    ${user.status === 'ACTIVE'
+      ? `<button class="danger" data-user-action="disable" data-user-id="${escapeHtml(user.userId)}" role="menuitem" type="button">停用</button>`
+      : user.status === 'DISABLED'
+        ? `<button data-user-action="enable" data-user-id="${escapeHtml(user.userId)}" role="menuitem" type="button">恢复</button>`
+        : ''}
+    <button class="danger" data-user-action="delete" data-user-id="${escapeHtml(user.userId)}" role="menuitem" type="button">删除</button>`;
+  const rect = button.getBoundingClientRect();
+  menu.style.top = `${rect.bottom + 6}px`;
+  menu.style.right = `${Math.max(12, window.innerWidth - rect.right)}px`;
+  menu.classList.remove('hidden');
 }
 
 function openUserDialog(user = null) {
@@ -467,6 +639,7 @@ function openUserDialog(user = null) {
   refreshGroupSelect();
   $('#user-id').value = user?.userId || '';
   setText('#user-dialog-title', user ? `编辑 · ${user.displayName || user.loginName || ''}`.trim() : '新建子账号');
+  setText('#user-submit', user ? '保存' : '创建账号');
   form.elements.loginName.readOnly = Boolean(user);
   form.elements.password.required = !user;
   form.dataset.originalPassword = user?.password || '';
@@ -478,6 +651,7 @@ function openUserDialog(user = null) {
     form.elements.configGroupId.value = user.configGroupId || '';
     form.elements.monthlyLimit.value = user.monthlyLimit || '';
   }
+  updateUserLimitHelp();
   $('#user-dialog').showModal();
 }
 
@@ -551,18 +725,20 @@ async function retrySubaccount(userId) {
 }
 
 async function loadPrices() {
-  const result = await api(`/api/admin/prices?appId=${encodeURIComponent(state.actor.accountId)}`);
+  refreshPriceScopeFilter();
+  const scopeId = $('#price-scope-filter').value;
+  const scopeType = scopeId === '*' ? 'PLATFORM' : 'CONFIG_GROUP';
+  const result = await api(`/api/admin/prices?accountId=${encodeURIComponent(state.actor.accountId)}&scopeType=${scopeType}&scopeId=${encodeURIComponent(scopeId)}`);
   const items = result.items || [];
   state.prices = items;
   $('#price-empty').classList.toggle('hidden', items.length > 0);
   $('#price-list').innerHTML = items.map(item => `<tr>
-    <td><strong>${escapeHtml(item.billingItemId)}</strong></td>
+    <td><div class="cell-title"><strong class="billing-item-full">${escapeHtml(item.billingItemId)}</strong>${item.custom ? '<span>自定义计费项</span>' : ''}</div></td>
     <td>${escapeHtml(item.unit)}</td>
-    <td>${item.appId === '*' ? '平台默认' : escapeHtml(item.appId)}</td>
     <td>${escapeHtml(formatMoney(item.customerUnitPrice))}</td>
     <td>${escapeHtml(formatMoney(item.costUnitPrice))}</td>
-    <td>${badge(item.enabled ? 'ACTIVE' : 'DISABLED')}</td>
-    <td><div class="inline-actions"><button class="small-button" data-price-action="edit" data-price-app-id="${escapeHtml(item.appId)}" data-price-item-id="${escapeHtml(item.billingItemId)}" data-price-unit="${escapeHtml(item.unit)}" type="button">编辑</button>${item.enabled ? `<button class="small-button danger" data-price-action="delete" data-price-app-id="${escapeHtml(item.appId)}" data-price-item-id="${escapeHtml(item.billingItemId)}" data-price-unit="${escapeHtml(item.unit)}" type="button">删除</button>` : ''}</div></td>
+    <td>${item.configured ? badge(item.enabled ? 'ACTIVE' : 'DISABLED') : '<span class="badge neutral">待配置</span>'}</td>
+    <td><div class="inline-actions"><button class="small-button" data-price-action="edit" data-price-scope-type="${escapeHtml(item.scopeType || '')}" data-price-scope-id="${escapeHtml(item.scopeId || '')}" data-price-item-id="${escapeHtml(item.billingItemId)}" data-price-unit="${escapeHtml(item.unit)}" type="button">${item.configured ? '编辑' : '配置'}</button>${item.enabled ? `<button class="small-button danger" data-price-action="delete" data-price-scope-type="${escapeHtml(item.scopeType)}" data-price-scope-id="${escapeHtml(item.scopeId)}" data-price-item-id="${escapeHtml(item.billingItemId)}" data-price-unit="${escapeHtml(item.unit)}" type="button">删除</button>` : ''}</div></td>
   </tr>`).join('');
 }
 
@@ -572,7 +748,9 @@ async function deletePrice(button) {
     await api('/api/admin/prices', {
       method: 'DELETE',
       body: JSON.stringify({
-        appId: button.dataset.priceAppId,
+        accountId: state.actor.accountId,
+        scopeType: button.dataset.priceScopeType,
+        scopeId: button.dataset.priceScopeId,
         billingItemId: button.dataset.priceItemId,
         unit: button.dataset.priceUnit,
       }),
@@ -589,20 +767,24 @@ function openPriceDialog(item = null) {
   form.reset();
   setFormMessage(form, '');
   $('#price-edit-mode').value = item ? '1' : '';
-  setText('#price-dialog-title', item ? `编辑 · ${item.billingItemId}` : '配置价格');
+  const title = item ? '编辑价格' : '新增价格';
+  setText('#price-dialog-title', title);
+  $('#price-dialog-title').title = title;
   // 计费项 ID、计费单位、作用范围是价格记录的主键，编辑时锁定，仅可改单价
   form.elements.billingItemId.readOnly = Boolean(item);
   form.elements.unit.readOnly = Boolean(item);
-  form.elements.platformDefault.disabled = Boolean(item);
+  form.elements.scopeId.disabled = Boolean(item?.configured);
+  refreshPriceScopeSelect(item?.scopeId || $('#price-scope-filter').value);
   if (item) {
     form.elements.billingItemId.value = item.billingItemId;
     form.elements.unit.value = item.unit;
-    form.elements.customerUnitPrice.value = item.customerUnitPrice;
-    form.elements.costUnitPrice.value = item.costUnitPrice;
-    form.elements.platformDefault.checked = item.appId === '*';
+    form.elements.customerUnitPrice.value = Number(item.customerUnitPrice || 0).toFixed(2);
+    form.elements.costUnitPrice.value = Number(item.costUnitPrice || 0).toFixed(2);
   } else {
-    form.elements.customerUnitPrice.value = '0';
-    form.elements.costUnitPrice.value = '0';
+    form.elements.billingItemId.value = '';
+    form.elements.unit.value = '';
+    form.elements.customerUnitPrice.value = '0.00';
+    form.elements.costUnitPrice.value = '0.00';
   }
   $('#price-dialog').showModal();
 }
@@ -615,7 +797,9 @@ async function submitPrice(event) {
     await api('/api/admin/prices', {
       method: 'POST',
       body: JSON.stringify({
-        appId: form.elements.platformDefault.checked ? '*' : state.actor.accountId,
+        accountId: state.actor.accountId,
+        scopeType: form.elements.scopeId.value === '*' ? 'PLATFORM' : 'CONFIG_GROUP',
+        scopeId: form.elements.scopeId.value,
         billingItemId: form.elements.billingItemId.value.trim(),
         unit: form.elements.unit.value.trim(),
         customerUnitPrice: form.elements.customerUnitPrice.value.trim(),
@@ -690,6 +874,97 @@ async function loadBills(period = $('#bill-period').value || currentPeriod()) {
   </tr>`).join('');
 }
 
+function renderModelFilterOptions() {
+  const billingSelect = $('#model-billing-item');
+  const selectedBilling = billingSelect.value;
+  const billingItems = [...new Set(state.billingCatalog.map(item => item.billingItemId))].sort();
+  billingSelect.innerHTML = '<option value="">全部</option>' + billingItems
+    .map(item => `<option value="${escapeHtml(item)}">${escapeHtml(item)}</option>`).join('');
+  billingSelect.value = billingItems.includes(selectedBilling) ? selectedBilling : '';
+}
+
+async function loadModelCatalog() {
+  const result = await api(`/api/admin/billing-catalog?accountId=${encodeURIComponent(state.actor.accountId)}`);
+  state.billingCatalog = result.items || [];
+  renderModelFilterOptions();
+}
+
+function formatUsageByUnit(items) {
+  return items.length > 0
+    ? `<span class="usage-grid">${items.map(item =>
+      `<span><strong>${escapeHtml(formatQuantity(item.usageValue, item.unit))}</strong><small>${escapeHtml(item.unit)}</small></span>`).join('')}</span>`
+    : '0';
+}
+
+function formatQuantity(value, unit) {
+  const parsed = Number(value || 0);
+  if (!Number.isFinite(parsed)) return unit === 'token' ? '0' : '0.00';
+  return parsed.toLocaleString('zh-CN', {
+    minimumFractionDigits: unit === 'token' ? 0 : 2,
+    maximumFractionDigits: unit === 'token' ? 0 : 6,
+  });
+}
+
+function tokenUsageDetails(tokenUsage) {
+  if (!tokenUsage) return '';
+  const input = formatQuantity(tokenUsage.inputTokens ?? 0, 'token');
+  const output = formatQuantity(tokenUsage.outputTokens ?? 0, 'token');
+  const cached = formatQuantity(tokenUsage.cachedTokens ?? 0, 'token');
+  const label = `Input ${input} / Output ${output} / Cached ${cached}`;
+  return `<div class="token-usage" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">
+    <div class="token-usage-primary"><span>${escapeHtml(input)}</span><span class="token-separator">/</span><span>${escapeHtml(output)}</span></div>
+    <div class="token-usage-cached"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11a3 3 0 0 1 3 3v14a3 3 0 0 0-3-3H6.5A2.5 2.5 0 0 0 4 19.5z"></path><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v17a3 3 0 0 1 3-3h1.5a2.5 2.5 0 0 1 2.5 2.5z"></path></svg><span>${escapeHtml(cached)}</span></div>
+  </div>`;
+}
+
+function usageCell(item) {
+  const main = `${formatQuantity(item.actualUsage ?? item.estimatedUsage, item.unit)} ${item.unit}`;
+  const tokenDetails = tokenUsageDetails(item.tokenUsage);
+  if (!tokenDetails) return escapeHtml(main);
+  return `<div class="cell-title usage-cell"><strong>${escapeHtml(main)}</strong>${tokenDetails}</div>`;
+}
+
+async function loadModelUsage(page = 1) {
+  state.modelPage = page;
+  const params = new URLSearchParams({
+    accountId: state.actor.accountId,
+    startDate: $('#model-start-date').value,
+    endDate: $('#model-end-date').value,
+    mode: $('#model-mode').value,
+    groupBy: 'billingItem',
+    page: String(page),
+    pageSize: '50',
+  });
+  const optional = {
+    billingItemId: $('#model-billing-item').value.trim(),
+    configGroupId: $('#model-config-group').value,
+    userId: $('#model-user').value,
+    status: $('#model-status').value,
+  };
+  Object.entries(optional).forEach(([key, value]) => {
+    if (value) params.set(key, value);
+  });
+  const result = await api(`/api/admin/model-usage?${params}`);
+  const summary = result.mode === 'summary';
+  setText('#model-call-count', result.totals.callCount || 0);
+  $('#model-usage-total').innerHTML = formatUsageByUnit(result.usageByUnit || []);
+  setText('#model-customer-amount', formatMoney(result.totals.customerAmount));
+  setText('#model-cost-amount', formatMoney(result.totals.costAmount));
+  $('#model-empty').classList.toggle('hidden', result.items.length > 0);
+  $('#model-head').innerHTML = summary
+    ? '<th>计费项</th><th>单位</th><th>调用数</th><th>成功</th><th>失败</th><th>用量</th><th>客户金额</th>'
+      + (state.actor.role === 'SYSTEM_ADMIN' ? '<th>内部成本</th>' : '')
+    : '<th>时间</th><th>计费项</th><th>配置组</th><th>子账号</th><th>状态</th><th>用量</th><th>客户金额</th>'
+      + (state.actor.role === 'SYSTEM_ADMIN' ? '<th>内部成本</th>' : '');
+  $('#model-list').innerHTML = result.items.map(item => summary
+    ? `<tr><td>${escapeHtml(item.dimensionName || item.dimensionId || '—')}</td><td>${escapeHtml(item.unit)}</td><td>${escapeHtml(item.callCount)}</td><td>${escapeHtml(item.successCount || 0)}</td><td>${escapeHtml(item.failedCount || 0)}</td><td>${escapeHtml(formatQuantity(item.usageValue, item.unit))}</td><td>${escapeHtml(formatMoney(item.customerAmount))}</td>${state.actor.role === 'SYSTEM_ADMIN' ? `<td>${escapeHtml(formatMoney(item.costAmount))}</td>` : ''}</tr>`
+    : `<tr><td>${escapeHtml(formatBeijingDateTime(item.createdAt))}</td><td>${escapeHtml(item.billingItemId)}</td><td>${escapeHtml(item.configGroupName)}</td><td>${escapeHtml(item.displayName || item.loginName)}</td><td>${modelStatusCell(item)}</td><td>${usageCell(item)}</td><td>${escapeHtml(formatMoney(item.customerAmount))}</td>${state.actor.role === 'SYSTEM_ADMIN' ? `<td>${escapeHtml(formatMoney(item.costAmount))}</td>` : ''}</tr>`).join('');
+  const totalPages = Math.max(1, Math.ceil(Number(result.total || 0) / Number(result.pageSize || 50)));
+  setText('#model-page', `第 ${result.page} / ${totalPages} 页`);
+  $('#model-prev').disabled = result.page <= 1;
+  $('#model-next').disabled = result.page >= totalPages;
+}
+
 function switchSection(section) {
   if (section === 'prices' && state.actor.role !== 'SYSTEM_ADMIN') return;
   $$('.page-section').forEach(node => node.classList.add('hidden'));
@@ -699,6 +974,9 @@ function switchSection(section) {
   if (section === 'configs') loadConfigGroups().catch(error => toast(error.message, true));
   if (section === 'users') loadUsers().catch(error => toast(error.message, true));
   if (section === 'prices') loadPrices().catch(error => toast(error.message, true));
+  if (section === 'models') loadModelCatalog()
+    .then(() => loadModelUsage())
+    .catch(error => toast(error.message, true));
   if (section === 'bills') loadBills().catch(error => toast(error.message, true));
 }
 
@@ -729,7 +1007,11 @@ $('#logout').addEventListener('click', async () => {
 $$('.nav-item').forEach(button => button.addEventListener('click', () => switchSection(button.dataset.section)));
 $('#new-config').addEventListener('click', () => openConfigDialog());
 $('#new-user').addEventListener('click', () => openUserDialog());
-$('#new-price').addEventListener('click', () => openPriceDialog());
+$('#add-price').addEventListener('click', () => openPriceDialog());
+$('#price-scope-filter').addEventListener('change', event => {
+  event.currentTarget.dataset.userSelected = 'true';
+  loadPrices().catch(error => toast(error.message, true));
+});
 $('#download-user-template').addEventListener('click', () => downloadCsvTemplate('subaccounts').catch(error => toast(error.message, true)));
 $('#download-price-template').addEventListener('click', () => downloadCsvTemplate('prices').catch(error => toast(error.message, true)));
 $('#import-users').addEventListener('click', () => $('#user-csv-file').click());
@@ -750,6 +1032,9 @@ $('#user-form').addEventListener('submit', submitUser);
 $('#price-form').addEventListener('submit', submitPrice);
 $('#bill-period').addEventListener('change', event => loadBills(event.target.value).catch(error => toast(error.message, true)));
 $('#bill-dimension').addEventListener('change', () => loadBills().catch(error => toast(error.message, true)));
+$('#model-search').addEventListener('click', () => loadModelUsage().catch(error => toast(error.message, true)));
+$('#model-prev').addEventListener('click', () => loadModelUsage(Math.max(1, state.modelPage - 1)).catch(error => toast(error.message, true)));
+$('#model-next').addEventListener('click', () => loadModelUsage(state.modelPage + 1).catch(error => toast(error.message, true)));
 $$('.config-mode-tab').forEach(button => button.addEventListener('click', () => setConfigMode(button.dataset.configMode)));
 
 $('#config-list').addEventListener('click', event => {
@@ -777,6 +1062,12 @@ $('#connection-list').addEventListener('click', event => {
 });
 
 $('#user-list').addEventListener('click', event => {
+  const menuButton = event.target.closest('[data-user-menu]');
+  if (menuButton) {
+    const user = state.users.find(item => item.userId === menuButton.dataset.userMenu);
+    if (user) openUserActionMenu(menuButton, user);
+    return;
+  }
   const button = event.target.closest('[data-user-action]');
   if (!button) return;
   if (button.dataset.userAction === 'toggle-password') {
@@ -786,7 +1077,7 @@ $('#user-list').addEventListener('click', event => {
     const value = button.closest('tr').querySelector('[data-password-value]');
     value.textContent = visible ? '••••••••' : user.password;
     button.dataset.visible = String(!visible);
-    button.textContent = visible ? '查看' : '隐藏';
+    button.textContent = visible ? '查看密码' : '隐藏密码';
     return;
   }
   if (button.dataset.userAction === 'edit') {
@@ -805,12 +1096,39 @@ $('#user-list').addEventListener('click', event => {
   setUserStatus(button.dataset.userId, button.dataset.userAction === 'enable' ? 'ACTIVE' : 'DISABLED');
 });
 
+$('#user-action-menu').addEventListener('click', event => {
+  const button = event.target.closest('[data-user-action]');
+  if (!button) return;
+  closeUserActionMenu();
+  if (button.dataset.userAction === 'edit') {
+    const user = state.users.find(item => item.userId === button.dataset.userId);
+    if (user) openUserDialog(user);
+    return;
+  }
+  if (button.dataset.userAction === 'retry') {
+    retrySubaccount(button.dataset.userId);
+    return;
+  }
+  if (button.dataset.userAction === 'delete') {
+    deleteSubaccount(button.dataset.userId);
+    return;
+  }
+  setUserStatus(button.dataset.userId, button.dataset.userAction === 'enable' ? 'ACTIVE' : 'DISABLED');
+});
+
+document.addEventListener('click', event => {
+  if (!event.target.closest('[data-user-menu], #user-action-menu')) closeUserActionMenu();
+});
+window.addEventListener('resize', closeUserActionMenu);
+window.addEventListener('scroll', closeUserActionMenu, true);
+
 $('#price-list').addEventListener('click', event => {
   const button = event.target.closest('[data-price-action]');
   if (!button) return;
   if (button.dataset.priceAction === 'edit') {
     const item = state.prices.find(price =>
-      price.appId === button.dataset.priceAppId
+      (price.scopeType || '') === button.dataset.priceScopeType
+      && (price.scopeId || '') === button.dataset.priceScopeId
       && price.billingItemId === button.dataset.priceItemId
       && price.unit === button.dataset.priceUnit);
     if (item) openPriceDialog(item);
@@ -826,6 +1144,7 @@ $('#toggle-user-password').addEventListener('click', () => {
   $('#toggle-user-password').textContent = visible ? '查看' : '隐藏';
   $('#toggle-user-password').setAttribute('aria-label', visible ? '显示密码' : '隐藏密码');
 });
+$('#user-config-group').addEventListener('change', updateUserLimitHelp);
 
 $$('.close-dialog').forEach(button => button.addEventListener('click', () => button.closest('dialog').close()));
 $$('dialog').forEach(dialog => dialog.addEventListener('close', () => {

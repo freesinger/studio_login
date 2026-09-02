@@ -6,6 +6,11 @@ import type { RowDataPacket } from 'mysql2/promise';
 import type { AppConfig } from './config.js';
 import type { Database } from './db.js';
 import { AppError, profileSyncError } from './errors.js';
+import {
+  currentBillingPeriod,
+  effectiveAvailableAmount,
+  quotaSnapshot,
+} from './quota.js';
 import { decryptJson, encryptJson, maskConfig } from './security.js';
 import { StudioConnectionService } from './studio-connections.js';
 import type { Actor, ResourceConfig } from './types.js';
@@ -22,7 +27,10 @@ interface GroupRow extends RowDataPacket {
   status: string;
   current_version: number;
   monthly_limit: string | null;
+  reserved_amount: string | null;
+  actual_amount: string | null;
   is_default: number;
+  project_level_sharing: number;
 }
 
 interface VersionRow extends RowDataPacket {
@@ -53,6 +61,11 @@ interface SubaccountRow extends RowDataPacket {
   profile_sync_request_id: string | null;
   current_version: number | null;
   monthly_limit: string | null;
+  group_monthly_limit: string | null;
+  user_reserved_amount: string | null;
+  user_actual_amount: string | null;
+  group_reserved_amount: string | null;
+  group_actual_amount: string | null;
   password_cipher: string | null;
   created_at: Date;
 }
@@ -80,6 +93,7 @@ interface ProfileTargetRow extends RowDataPacket {
   project_id: string | null;
   current_version: number | null;
   encrypted_config: string | null;
+  project_level_sharing?: number | null;
 }
 
 function groupId(): string {
@@ -124,6 +138,7 @@ export class ConfigGroupService {
     resourceConfig: ResourceConfig;
     monthlyLimit: string | null;
     isDefault: boolean;
+    projectLevelSharing: boolean;
     actor: Actor;
   }): Promise<{ configGroupId: string; version: number; status: string }> {
     await this.requireStudioReady(input.accountId, input.connectionId);
@@ -140,8 +155,8 @@ export class ConfigGroupService {
       await tx.execute(
         `INSERT INTO config_groups
           (config_group_id, account_id, connection_id, project_id, name, status,
-           current_version, monthly_limit, is_default)
-         VALUES (?, ?, ?, ?, ?, 'DRAFT', 0, ?, ?)`,
+           current_version, monthly_limit, is_default, project_level_sharing)
+         VALUES (?, ?, ?, ?, ?, 'DRAFT', 0, ?, ?, ?)`,
         [
           id,
           input.accountId,
@@ -150,6 +165,7 @@ export class ConfigGroupService {
           input.projectId.trim(),
           input.monthlyLimit,
           input.isDefault,
+          input.projectLevelSharing,
         ],
       );
       await tx.execute(
@@ -174,6 +190,7 @@ export class ConfigGroupService {
     projectId?: string;
     resourceConfig: ResourceConfig;
     monthlyLimit?: string | null;
+    projectLevelSharing?: boolean;
     actor: Actor;
   }): Promise<{ version: number }> {
     return this.database.transaction(async tx => {
@@ -236,9 +253,16 @@ export class ConfigGroupService {
       await tx.execute(
         `UPDATE config_groups
             SET status = 'DRAFT', connection_id = ?, project_id = ?,
-                monthly_limit = COALESCE(?, monthly_limit)
+                monthly_limit = COALESCE(?, monthly_limit),
+                project_level_sharing = COALESCE(?, project_level_sharing)
           WHERE config_group_id = ?`,
-        [connectionId, projectId, input.monthlyLimit ?? null, input.configGroupId],
+        [
+          connectionId,
+          projectId,
+          input.monthlyLimit ?? null,
+          input.projectLevelSharing ?? null,
+          input.configGroupId,
+        ],
       );
       return { version };
     });
@@ -251,26 +275,43 @@ export class ConfigGroupService {
     projectId?: string;
     resourceConfig: ResourceConfig;
     monthlyLimit: string | null;
+    projectLevelSharing?: boolean;
     actor: Actor;
   }): Promise<{ version: number; synced: number; failed: number }> {
     await this.createVersion(input);
     await this.database.execute(
-      'UPDATE config_groups SET name = project_id, monthly_limit = ? WHERE config_group_id = ? AND account_id = ?',
-      [input.monthlyLimit, input.configGroupId, input.accountId],
+      `UPDATE config_groups
+          SET name = project_id, monthly_limit = ?,
+              project_level_sharing = COALESCE(?, project_level_sharing)
+        WHERE config_group_id = ? AND account_id = ?`,
+      [
+        input.monthlyLimit,
+        input.projectLevelSharing ?? null,
+        input.configGroupId,
+        input.accountId,
+      ],
     );
     return this.publish(input);
   }
 
   async list(accountId: string): Promise<unknown[]> {
+    const billingPeriod = currentBillingPeriod();
     const groups = await this.database.query<GroupRow>(
       `SELECT g.config_group_id, g.account_id, g.connection_id, g.project_id, g.name,
               g.status, g.current_version, g.monthly_limit, g.is_default,
-              r.name AS connection_name, r.app_id AS connection_app_id
+              g.project_level_sharing,
+              r.name AS connection_name, r.app_id AS connection_app_id,
+              p.reserved_amount, p.actual_amount
          FROM config_groups g
          JOIN studio_registrations r ON r.connection_id = g.connection_id
+         LEFT JOIN period_usage p
+           ON p.app_id = r.app_id
+          AND p.subject_type = 'CONFIG_GROUP'
+          AND p.subject_id = g.config_group_id
+          AND p.billing_period = ?
         WHERE g.account_id = ? AND g.status <> 'DELETED'
         ORDER BY g.created_at`,
-      [accountId],
+      [billingPeriod, accountId],
     );
     const result: unknown[] = [];
     for (const group of groups) {
@@ -307,7 +348,14 @@ export class ConfigGroupService {
         currentVersion: Number(group.current_version),
         latestVersion: versions[0]?.version ?? 0,
         monthlyLimit: group.monthly_limit,
+        billingPeriod,
+        quota: quotaSnapshot(
+          group.monthly_limit,
+          group.actual_amount,
+          group.reserved_amount,
+        ),
         isDefault: Boolean(group.is_default),
+        projectLevelSharing: Boolean(group.project_level_sharing),
         failedCount: failedUsers.length,
         failedUsers: failedUsers.map(user => ({
           userId: user.user_id,
@@ -367,6 +415,13 @@ export class ConfigGroupService {
       group.connection_id,
       resourceConfig.lasApiKey ?? '',
     );
+    await this.studioConnections.upsertProjectProfile(
+      input.accountId,
+      group.connection_id,
+      group.project_id,
+      resourceConfig,
+      Boolean(group.project_level_sharing),
+    );
 
     await this.database.execute(
       "UPDATE config_groups SET status = 'SYNCING' WHERE config_group_id = ?",
@@ -387,6 +442,7 @@ export class ConfigGroupService {
           group.project_id,
           user.login_name,
           resourceConfig,
+          Boolean(group.project_level_sharing),
         );
         await this.database.execute(
           `UPDATE users
@@ -465,12 +521,24 @@ export class ConfigGroupService {
       ],
     );
     try {
+      const resourceConfig = decryptJson<ResourceConfig>(
+        version.encrypted_config,
+        this.config.encryptionKey,
+      );
+      await this.studioConnections.upsertProjectProfile(
+        input.accountId,
+        group.connection_id,
+        group.project_id,
+        resourceConfig,
+        Boolean(group.project_level_sharing),
+      );
       await this.studioConnections.upsertUserProfile(
         input.accountId,
         group.connection_id,
         group.project_id,
         input.loginName.trim(),
-        decryptJson<ResourceConfig>(version.encrypted_config, this.config.encryptionKey),
+        resourceConfig,
+        Boolean(group.project_level_sharing),
       );
       await this.database.execute(
         `UPDATE users
@@ -515,35 +583,75 @@ export class ConfigGroupService {
   }
 
   async listSubaccounts(accountId: string): Promise<unknown[]> {
+    const billingPeriod = currentBillingPeriod();
     const rows = await this.database.query<SubaccountRow>(
       `SELECT u.user_id, u.login_name, u.display_name, u.status, u.config_group_id,
               g.name AS config_group_name, u.profile_sync_version, g.current_version,
               u.profile_sync_error_code, u.profile_sync_error_message,
-              u.profile_sync_request_id, u.monthly_limit, u.password_cipher, u.created_at
+              u.profile_sync_request_id, u.monthly_limit,
+              g.monthly_limit AS group_monthly_limit,
+              up.reserved_amount AS user_reserved_amount,
+              up.actual_amount AS user_actual_amount,
+              gp.reserved_amount AS group_reserved_amount,
+              gp.actual_amount AS group_actual_amount,
+              u.password_cipher, u.created_at
          FROM users u
          LEFT JOIN config_groups g ON g.config_group_id = u.config_group_id
+         LEFT JOIN studio_registrations r ON r.connection_id = g.connection_id
+         LEFT JOIN period_usage up
+           ON up.app_id = r.app_id
+          AND up.subject_type = 'USER'
+          AND up.subject_id = u.user_id
+          AND up.billing_period = ?
+         LEFT JOIN period_usage gp
+           ON gp.app_id = r.app_id
+          AND gp.subject_type = 'CONFIG_GROUP'
+          AND gp.subject_id = g.config_group_id
+          AND gp.billing_period = ?
         WHERE u.account_id = ? AND u.role = 'SUBACCOUNT' AND u.status <> 'DELETED'
         ORDER BY u.created_at DESC`,
-      [accountId],
+      [billingPeriod, billingPeriod, accountId],
     );
-    return rows.map(row => ({
-      userId: row.user_id,
-      loginName: row.login_name,
-      displayName: row.display_name,
-      status: row.status,
-      configGroupId: row.config_group_id,
-      configGroupName: row.config_group_name,
-      profileSyncVersion: row.profile_sync_version,
-      currentVersion: row.current_version,
-      profileSyncErrorCode: row.profile_sync_error_code,
-      profileSyncErrorMessage: row.profile_sync_error_message,
-      profileSyncRequestId: row.profile_sync_request_id,
-      monthlyLimit: row.monthly_limit,
-      password: row.password_cipher
-        ? decryptJson<string>(row.password_cipher, this.config.encryptionKey)
-        : null,
-      createdAt: row.created_at,
-    }));
+    return rows.map(row => {
+      const quota = quotaSnapshot(
+        row.monthly_limit,
+        row.user_actual_amount,
+        row.user_reserved_amount,
+      );
+      const groupQuota = quotaSnapshot(
+        row.group_monthly_limit,
+        row.group_actual_amount,
+        row.group_reserved_amount,
+      );
+      return {
+        userId: row.user_id,
+        loginName: row.login_name,
+        displayName: row.display_name,
+        status: row.status,
+        configGroupId: row.config_group_id,
+        configGroupName: row.config_group_name,
+        profileSyncVersion: row.profile_sync_version,
+        currentVersion: row.current_version,
+        profileSyncErrorCode: row.profile_sync_error_code,
+        profileSyncErrorMessage: row.profile_sync_error_message,
+        profileSyncRequestId: row.profile_sync_request_id,
+        monthlyLimit: row.monthly_limit,
+        groupMonthlyLimit: row.group_monthly_limit,
+        billingPeriod,
+        quota: {
+          ...quota,
+          effectiveAvailableAmount: effectiveAvailableAmount(
+            quota.availableAmount,
+            groupQuota.availableAmount,
+          ),
+        },
+        groupQuota,
+        password: row.password_cipher
+          ? decryptJson<string>(row.password_cipher, this.config.encryptionKey)
+          : null,
+        createdAt: row.created_at,
+      };
+    });
   }
 
   async setSubaccountStatus(input: {
@@ -618,12 +726,24 @@ export class ConfigGroupService {
     const version = versions[0];
     if (!version) throw new AppError('配置组生效版本不存在', 409, 'CONFIG_VERSION_NOT_FOUND');
 
+    const resourceConfig = decryptJson<ResourceConfig>(
+      version.encrypted_config,
+      this.config.encryptionKey,
+    );
+    await this.studioConnections.upsertProjectProfile(
+      input.accountId,
+      group.connection_id,
+      group.project_id,
+      resourceConfig,
+      Boolean(group.project_level_sharing),
+    );
     await this.studioConnections.upsertUserProfile(
       input.accountId,
       group.connection_id,
       group.project_id,
       users[0].login_name,
-      decryptJson<ResourceConfig>(version.encrypted_config, this.config.encryptionKey),
+      resourceConfig,
+      Boolean(group.project_level_sharing),
     );
     const passwordHash = input.password ? await bcrypt.hash(input.password, 12) : null;
     const passwordCipher = input.password
@@ -654,7 +774,7 @@ export class ConfigGroupService {
   }): Promise<{ userId: string; status: string }> {
     const rows = await this.database.query<ProfileTargetRow>(
       `SELECT u.role, u.status, u.login_name, u.config_group_id, g.connection_id, g.project_id,
-              g.current_version, v.encrypted_config
+              g.current_version, g.project_level_sharing, v.encrypted_config
          FROM users u
          LEFT JOIN config_groups g ON g.config_group_id = u.config_group_id
          LEFT JOIN config_group_versions v ON v.config_group_id = g.config_group_id
@@ -671,12 +791,24 @@ export class ConfigGroupService {
       throw new AppError('子账号配置组未就绪', 409, 'PROFILE_NOT_SYNCED');
     }
     try {
+      const resourceConfig = decryptJson<ResourceConfig>(
+        user.encrypted_config,
+        this.config.encryptionKey,
+      );
+      await this.studioConnections.upsertProjectProfile(
+        input.accountId,
+        user.connection_id,
+        user.project_id,
+        resourceConfig,
+        Boolean(user.project_level_sharing),
+      );
       await this.studioConnections.upsertUserProfile(
         input.accountId,
         user.connection_id,
         user.project_id,
         user.login_name,
-        decryptJson<ResourceConfig>(user.encrypted_config, this.config.encryptionKey),
+        resourceConfig,
+        Boolean(user.project_level_sharing),
       );
       await this.database.execute(
         `UPDATE users

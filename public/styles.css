@@ -111,15 +111,57 @@ tbody tr:last-child td { border-bottom: 0; }
 .cell-title { display: grid; gap: 3px; }
 .cell-title strong { font-size: 13px; }
 .cell-title span { color: #817e77; font-size: 11px; }
+.billing-item-full { display: block; overflow-wrap: anywhere; word-break: break-word; }
+.user-table { table-layout: fixed; }
+.user-table th:nth-child(1) { width: 19%; }
+.user-table th:nth-child(2) { width: 16%; }
+.user-table th:nth-child(3) { width: 14%; }
+.user-table th:nth-child(4),
+.user-table th:nth-child(5),
+.user-table th:nth-child(6) { width: 12%; }
+.user-table th:nth-child(7) { width: 10%; }
+.user-table th:nth-child(8) { width: 5%; }
+.user-table td { padding-top: 16px; padding-bottom: 16px; overflow-wrap: anywhere; }
+.user-password { display: flex; align-items: center; gap: 7px; min-height: 26px; }
+.link-button { min-height: 25px; padding: 0; border: 0; color: #55514a; background: transparent; font-size: 11px; }
+.link-button:hover { border-color: transparent; text-decoration: underline; }
+.user-status .badge { width: fit-content; }
+.user-menu-cell { text-align: right; }
+.user-menu-trigger { width: 32px; min-height: 32px; padding: 0; border: 1px solid #dcd8cf; border-radius: 8px; background: white; cursor: pointer; font-size: 20px; line-height: 1; }
+.user-menu-trigger:hover { border-color: #aaa59c; background: #fbfaf8; }
+.user-action-menu { position: fixed; z-index: 30; display: grid; min-width: 116px; padding: 5px; border: 1px solid #ddd8cf; border-radius: 10px; background: white; box-shadow: 0 12px 30px rgba(35,31,26,.16); }
+.user-action-menu button { min-height: 34px; padding: 0 11px; border: 0; border-radius: 7px; background: transparent; cursor: pointer; text-align: left; font-size: 12px; font-weight: 650; }
+.user-action-menu button:hover { background: #f3f0ea; }
+.user-action-menu button.danger { color: #a12b25; }
+.usage-cell { gap: 5px; }
+.token-usage { display: grid; gap: 3px; width: max-content; font-variant-numeric: tabular-nums; }
+.token-usage-primary { display: flex; align-items: center; gap: 7px; color: #292824; font-size: 12px; line-height: 1.2; }
+.cell-title .token-usage-primary span { color: inherit; font-size: inherit; }
+.cell-title .token-separator { color: #9a968e; }
+.token-usage-cached { display: flex; align-items: center; gap: 5px; color: #4b4a45; font-size: 11px; line-height: 1.2; }
+.cell-title .token-usage-cached span { color: inherit; font-size: inherit; }
+.token-usage-cached svg { width: 14px; height: 14px; fill: none; stroke: #1987a8; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
 .empty { padding: 46px 20px; color: #77736d; text-align: center; font-size: 13px; }
 .inline-field { display: grid; grid-template-columns: auto 150px; align-items: center; gap: 9px; }
 .inline-field input { min-height: 38px; }
 .bill-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 14px; }
+#section-models .bill-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.model-description { margin: 0 0 12px; }
+.model-filters { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; padding: 14px; align-items: end; }
+.model-filters input, .model-filters select { padding: 9px 10px; }
+#section-models .table-card > .inline-actions { padding: 12px 18px; }
+.usage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; align-items: start; }
+.usage-grid span { display: grid; gap: 2px; min-width: 0; color: inherit; }
+.usage-grid strong { overflow: hidden; text-overflow: ellipsis; font-size: 30px; line-height: 1; letter-spacing: -.03em; }
+.usage-grid small { color: #77736d; font-size: 12px; line-height: 1.1; }
 .modal { width: min(760px, calc(100vw - 28px)); max-height: calc(100vh - 36px); padding: 0; border: 0; border-radius: 16px; box-shadow: 0 22px 70px rgba(24,20,15,.22); }
 .modal::backdrop { background: rgba(26,24,20,.42); backdrop-filter: blur(2px); }
 .small-modal { width: min(500px, calc(100vw - 28px)); }
-.dialog-form { padding: 25px; overflow-y: auto; }
+.dialog-form { min-width: 0; padding: 25px; overflow-y: auto; overflow-x: clip; }
 .dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.dialog-heading { flex: 1; min-width: 0; }
+.dialog-header > .icon-button { flex: none; }
+#price-form label, #price-form input { min-width: 0; }
 .form-section { display: grid; gap: 13px; padding-top: 18px; border-top: 1px solid #eae6df; }
 .form-section h3 { margin: 0; font-size: 14px; }
 .resource-config-section { display: grid; gap: 14px; padding-top: 18px; border-top: 1px solid #eae6df; }
@@ -147,4 +189,4 @@ details p { margin: 8px 0; }
 @media (max-width: 1000px) { .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .config-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 820px) { .login-shell { grid-template-columns: 1fr; gap: 30px; padding: 28px 18px; } .login-intro h1 { font-size: 44px; } .admin-shell { grid-template-columns: 1fr; } .sidebar { position: static; height: auto; padding: 12px; border-right: 0; border-bottom: 1px solid #e3e0d8; } .sidebar-brand { padding-bottom: 12px; } .sidebar nav { grid-template-columns: repeat(5, minmax(100px, 1fr)); overflow-x: auto; } .nav-item { text-align: center; white-space: nowrap; } .sidebar-footer { display: none; } .workspace { padding: 24px 16px 55px; } .workspace-header { margin-bottom: 25px; } .account-pill { display: none; } }
 @media (max-width: 700px) { .connection-grid { grid-template-columns: 1fr; } }
-@media (max-width: 560px) { .trust-grid, .stats-grid, .bill-stats, .form-grid.two-columns { grid-template-columns: 1fr; } .login-card { padding: 22px; } .workspace-header h1 { font-size: 25px; } .section-toolbar { align-items: stretch; flex-direction: column; } .section-toolbar .primary { width: 100%; } .config-card-header { flex-direction: column; } .config-meta { grid-template-columns: 1fr 1fr; } .dialog-form { padding: 20px; } }
+@media (max-width: 560px) { .trust-grid, .stats-grid, .bill-stats, .form-grid.two-columns, #section-models .bill-stats { grid-template-columns: 1fr; } .login-card { padding: 22px; } .workspace-header h1 { font-size: 25px; } .section-toolbar { align-items: stretch; flex-direction: column; } .section-toolbar .primary { width: 100%; } .config-card-header { flex-direction: column; } .config-meta { grid-template-columns: 1fr 1fr; } .dialog-form { padding: 20px; } }

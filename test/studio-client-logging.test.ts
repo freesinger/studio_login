@@ -26,6 +26,71 @@ afterEach(() => {
 });
 
 describe('StudioAdminClient logging', () => {
+  it('sends project-level sharing when upserting a project profile', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      code: 200,
+      message: 'success',
+      data: {},
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new StudioAdminClient();
+
+    await client.upsertProjectProfile({
+      studioBaseUrl: 'https://studio.example.com',
+      integrationToken: 'integration-token',
+    }, {
+      appId: 'app-1',
+      projectId: 'project-1',
+      projectLevelSharing: true,
+      config: {
+        lasApiKey: 'las-secret',
+        arkApiKey: 'ark-secret',
+        tosBucketName: 'bucket-1',
+      },
+    });
+
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(request.body))).toMatchObject({
+      appId: 'app-1',
+      projectId: 'project-1',
+      projectLevelSharing: true,
+      tosBucketName: 'bucket-1',
+    });
+  });
+
+  it('sends config-group sharing when upserting a user profile', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      code: 200,
+      message: 'success',
+      data: {},
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new StudioAdminClient();
+
+    await client.upsertUserProfile({
+      studioBaseUrl: 'https://studio.example.com',
+      integrationToken: 'integration-token',
+    }, {
+      appId: 'app-1',
+      projectId: 'project-1',
+      userId: 'worker-1',
+      projectLevelSharing: true,
+      config: {
+        lasApiKey: 'las-secret',
+        arkApiKey: 'ark-secret',
+        tosBucketName: 'bucket-1',
+      },
+    });
+
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(request.body))).toMatchObject({
+      appId: 'app-1',
+      projectId: 'project-1',
+      userId: 'worker-1',
+      projectLevelSharing: true,
+    });
+  });
+
   it('reads the non-sensitive Studio deployment profile', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
       code: 200,

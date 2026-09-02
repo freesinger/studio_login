@@ -3,6 +3,7 @@ export class AppError extends Error {
     message: string,
     readonly statusCode = 400,
     readonly code = 'BAD_REQUEST',
+    readonly details?: unknown,
   ) {
     super(message);
   }

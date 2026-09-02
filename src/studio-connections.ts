@@ -9,6 +9,7 @@ import { decryptJson, encryptJson } from './security.js';
 import {
   StudioAdminClient,
   type StudioConnection,
+  type StudioBillingCatalogItem,
   type StudioDeploymentProfile,
 } from './studio-client.js';
 import type { Actor, ResourceConfig } from './types.js';
@@ -26,6 +27,11 @@ interface ConnectionRow extends RowDataPacket {
   ticket_url: string;
   estimate_url: string;
   actual_url: string;
+  billing_catalog_json: string | StudioBillingCatalogItem[] | null;
+}
+
+export interface BillingCatalogItem extends StudioBillingCatalogItem {
+  connectionNames: string[];
 }
 
 export interface StudioConnectionView {
@@ -365,6 +371,12 @@ export class StudioConnectionService {
         ticketUrl: claim.ticket_url,
       });
       await this.registerUsageEndpointsForCurrentGroups(connection, claim);
+      await this.refreshBillingCatalogRow(claim).catch(async error => {
+        await this.database.execute(
+          'UPDATE studio_registrations SET billing_catalog_error = ? WHERE connection_id = ?',
+          [asErrorMessage(error).slice(0, 512), connectionId],
+        );
+      });
       await this.database.execute(
         "UPDATE studio_registrations SET status = 'READY', last_error = NULL WHERE connection_id = ?",
         [connectionId],
@@ -385,6 +397,7 @@ export class StudioConnectionService {
     projectId: string,
     userId: string,
     resourceConfig: ResourceConfig,
+    projectLevelSharing: boolean,
   ): Promise<void> {
     const row = await this.requireReadyRowById(accountId, connectionId);
     const connection = this.connectionFromRow(row);
@@ -392,6 +405,24 @@ export class StudioConnectionService {
       appId: row.app_id,
       projectId,
       userId,
+      projectLevelSharing,
+      config: resourceConfig,
+    });
+  }
+
+  async upsertProjectProfile(
+    accountId: string,
+    connectionId: string,
+    projectId: string,
+    resourceConfig: ResourceConfig,
+    projectLevelSharing: boolean,
+  ): Promise<void> {
+    const row = await this.requireReadyRowById(accountId, connectionId);
+    const connection = this.connectionFromRow(row);
+    await this.studioClient.upsertProjectProfile(connection, {
+      appId: row.app_id,
+      projectId,
+      projectLevelSharing,
       config: resourceConfig,
     });
   }
@@ -415,6 +446,76 @@ export class StudioConnectionService {
       ? await this.requireReadyRowById(accountId, connectionId)
       : await this.requireReadyRow(accountId);
     return this.studioClient.getDeploymentProfile(this.connectionFromRow(row), row.app_id);
+  }
+
+  async billingCatalog(accountId: string): Promise<BillingCatalogItem[]> {
+    const rows = await this.database.query<ConnectionRow>(
+      `SELECT * FROM studio_registrations
+        WHERE account_id = ? AND status = 'READY'
+        ORDER BY name, connection_id`,
+      [accountId],
+    );
+    for (const row of rows) {
+      await this.refreshBillingCatalogRow(row).catch(async error => {
+        await this.database.execute(
+          'UPDATE studio_registrations SET billing_catalog_error = ? WHERE connection_id = ?',
+          [asErrorMessage(error).slice(0, 512), row.connection_id],
+        );
+      });
+    }
+    const refreshed = await this.database.query<ConnectionRow>(
+      `SELECT * FROM studio_registrations
+        WHERE account_id = ? AND status = 'READY'
+        ORDER BY name, connection_id`,
+      [accountId],
+    );
+    const merged = new Map<string, BillingCatalogItem>();
+    for (const row of refreshed) {
+      for (const item of this.catalogFromRow(row)) {
+        const key = `${item.billingItemId}\u0000${item.unit}`;
+        const current = merged.get(key) ?? {
+          ...item,
+          operatorIds: [],
+          connectionNames: [],
+        };
+        current.operatorIds = [...new Set([...current.operatorIds, ...item.operatorIds])].sort();
+        current.connectionNames.push(row.name);
+        merged.set(key, current);
+      }
+    }
+    if (rows.length > 0 && merged.size === 0) {
+      throw new AppError('暂时无法从 Studio 获取计费项', 502, 'STUDIO_BILLING_CATALOG_UNAVAILABLE');
+    }
+    return [...merged.values()].sort((left, right) =>
+      left.billingItemId.localeCompare(right.billingItemId) || left.unit.localeCompare(right.unit));
+  }
+
+  async assertBillingCatalogItem(accountId: string, billingItemId: string, unit: string): Promise<void> {
+    const catalog = await this.billingCatalog(accountId);
+    if (!catalog.some(item => item.billingItemId === billingItemId && item.unit === unit)) {
+      throw new AppError('计费项或单位不在 Studio 支持目录中', 400, 'BILLING_ITEM_NOT_SUPPORTED');
+    }
+  }
+
+  async assertConnectionBillingCatalogItems(
+    connectionId: string,
+    appId: string,
+    items: Array<{ BillingItemId: string; Unit: string }>,
+  ): Promise<void> {
+    const row = await this.requireReadyRowByAppId(appId, connectionId);
+    await this.refreshBillingCatalogRow(row).catch(() => undefined);
+    const refreshed = await this.requireReadyRowByAppId(appId, connectionId);
+    const supported = new Set(this.catalogFromRow(refreshed)
+      .map(item => `${item.billingItemId}\u0000${item.unit}`));
+    for (const item of items) {
+      if (!supported.has(`${item.BillingItemId}\u0000${item.Unit}`)) {
+        throw new AppError(
+          `Studio 不支持计费项: ${item.BillingItemId}/${item.Unit}`,
+          400,
+          'BILLING_ITEM_NOT_SUPPORTED',
+        );
+      }
+    }
   }
 
   async registerUsageEndpoint(accountId: string, connectionId: string, lasApiKey: string): Promise<void> {
@@ -601,6 +702,29 @@ export class StudioConnectionService {
     }
     for (const lasApiKey of apiKeys) {
       await this.registerUsageEndpointForRow(connection, row, lasApiKey);
+    }
+  }
+
+  private async refreshBillingCatalogRow(row: ConnectionRow): Promise<void> {
+    const items = await this.studioClient.getBillingCatalog(this.connectionFromRow(row), row.app_id);
+    await this.database.execute(
+      `UPDATE studio_registrations
+          SET billing_catalog_json = ?, billing_catalog_synced_at = UTC_TIMESTAMP(3),
+              billing_catalog_error = NULL
+        WHERE connection_id = ?`,
+      [JSON.stringify(items), row.connection_id],
+    );
+  }
+
+  private catalogFromRow(row: ConnectionRow): StudioBillingCatalogItem[] {
+    if (!row.billing_catalog_json) return [];
+    try {
+      const parsed = typeof row.billing_catalog_json === 'string'
+        ? JSON.parse(row.billing_catalog_json) as unknown
+        : row.billing_catalog_json;
+      return Array.isArray(parsed) ? parsed as StudioBillingCatalogItem[] : [];
+    } catch {
+      return [];
     }
   }
 

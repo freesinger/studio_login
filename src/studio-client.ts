@@ -15,6 +15,12 @@ export interface StudioDeploymentProfile {
   requiredResourceFields: string[];
 }
 
+export interface StudioBillingCatalogItem {
+  billingItemId: string;
+  unit: string;
+  operatorIds: string[];
+}
+
 interface StudioRequestContext {
   operation: string;
   appId: string;
@@ -172,14 +178,30 @@ export class StudioAdminClient {
     appId: string;
     projectId: string;
     userId: string;
+    projectLevelSharing: boolean;
     config: ResourceConfig;
   }): Promise<void> {
     await this.post(connection, '/integration/api/v1/user-profiles/upsert', {
       appId: input.appId,
       projectId: input.projectId,
       userId: input.userId,
+      projectLevelSharing: input.projectLevelSharing,
       ...input.config,
     }, { operation: 'upsert_user_profile', appId: input.appId, userId: input.userId });
+  }
+
+  async upsertProjectProfile(connection: StudioConnection, input: {
+    appId: string;
+    projectId: string;
+    projectLevelSharing: boolean;
+    config: ResourceConfig;
+  }): Promise<void> {
+    await this.post(connection, '/integration/api/v1/user-profiles/upsert', {
+      appId: input.appId,
+      projectId: input.projectId,
+      projectLevelSharing: input.projectLevelSharing,
+      ...input.config,
+    }, { operation: 'upsert_project_profile', appId: input.appId });
   }
 
   async deleteUserProfile(connection: StudioConnection, input: {
@@ -218,5 +240,29 @@ export class StudioAdminClient {
       tosRegion: profile.tosRegion,
       requiredResourceFields: profile.requiredResourceFields,
     };
+  }
+
+  async getBillingCatalog(
+    connection: StudioConnection,
+    appId: string,
+  ): Promise<StudioBillingCatalogItem[]> {
+    const response = await this.post(connection, '/integration/api/v1/billing-catalog/get', {
+      appId,
+    }, { operation: 'get_billing_catalog', appId });
+    const payload = await response.json() as { data?: { items?: unknown } };
+    if (!Array.isArray(payload.data?.items)) {
+      throw new AppError('Studio 计费目录响应不完整', 502, 'STUDIO_BILLING_CATALOG_INVALID');
+    }
+    return payload.data.items.map(item => {
+      const value = item as Partial<StudioBillingCatalogItem>;
+      if (!value.billingItemId || !value.unit || !Array.isArray(value.operatorIds)) {
+        throw new AppError('Studio 计费目录响应不完整', 502, 'STUDIO_BILLING_CATALOG_INVALID');
+      }
+      return {
+        billingItemId: value.billingItemId,
+        unit: value.unit,
+        operatorIds: value.operatorIds.filter(operatorId => typeof operatorId === 'string'),
+      };
+    });
   }
 }

@@ -1,4 +1,5 @@
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
 
 import cookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
@@ -17,10 +18,12 @@ import {
 } from './billing.js';
 import type { AppConfig } from './config.js';
 import { ConfigGroupService } from './config-groups.js';
+import { derivedCustomBillingCatalog } from './custom-billing-items.js';
 import { importCsvRows, parseCsvRecords } from './csv-import.js';
 import type { Database } from './db.js';
 import { AppError } from './errors.js';
 import { createAppLogger } from './logging.js';
+import { ModelUsageService } from './model-usage.js';
 import { StudioAdminClient } from './studio-client.js';
 import { StudioConnectionService } from './studio-connections.js';
 import { TicketService } from './tickets.js';
@@ -55,6 +58,7 @@ const resourceConfigSchema = z.object({
   region: z.string().max(64).optional(),
   customImageModelConfigs: z.unknown().optional(),
   customLlmModelConfigs: z.unknown().optional(),
+  customModels: z.unknown().optional(),
 }).strict();
 
 const nonNegativeAmount = z.union([z.string(), z.number()])
@@ -72,12 +76,14 @@ const createGroupSchema = z.object({
   resourceConfig: resourceConfigSchema,
   monthlyLimit: optionalAmount,
   isDefault: z.boolean().default(false),
+  projectLevelSharing: z.boolean().default(false),
 });
 
 const createVersionSchema = z.object({
   accountId: z.string().min(1).max(64),
   resourceConfig: resourceConfigSchema,
   monthlyLimit: optionalAmount,
+  projectLevelSharing: z.boolean().optional(),
 });
 
 const saveGroupSchema = z.object({
@@ -87,6 +93,7 @@ const saveGroupSchema = z.object({
   name: z.string().min(1).max(128).optional(),
   resourceConfig: resourceConfigSchema,
   monthlyLimit: optionalAmount,
+  projectLevelSharing: z.boolean().optional(),
 });
 
 const createSubaccountSchema = z.object({
@@ -112,7 +119,9 @@ const updateSubaccountSchema = z.object({
 });
 
 const priceSchema = z.object({
-  appId: z.string().min(1).max(64),
+  accountId: z.string().min(1).max(64),
+  scopeType: z.enum(['CONFIG_GROUP', 'PLATFORM']),
+  scopeId: z.string().min(1).max(64),
   billingItemId: z.string().min(1).max(128),
   unit: z.string().min(1).max(32),
   customerUnitPrice: nonNegativeAmount,
@@ -135,10 +144,9 @@ const subaccountCsvRowSchema = z.object({
 const priceCsvRowSchema = z.object({
   billingItemId: z.string().min(1).max(128),
   unit: z.string().min(1).max(32),
+  configGroup: z.string().min(1).max(128),
   customerUnitPrice: nonNegativeAmount,
   costUnitPrice: nonNegativeAmount,
-  platformDefault: z.enum(['', 'false', 'true', '0', '1', '否', '是']).default('')
-    .transform(value => ['true', '1', '是'].includes(value)),
 }).passthrough();
 
 const baselineItemSchema = z.object({
@@ -146,6 +154,7 @@ const baselineItemSchema = z.object({
   Unit: z.string().min(1).max(32),
   Usage: z.union([z.number(), z.string()]),
   ModelId: z.string().max(128).optional(),
+  BillingContext: z.string().max(20000).optional(),
 });
 
 const precheckSchema = z.object({
@@ -162,6 +171,17 @@ function requestIp(request: FastifyRequest): string {
   return request.ip || 'unknown';
 }
 
+function headerValue(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) return value[0];
+  return value;
+}
+
+function validRequestId(value: string | undefined): string | undefined {
+  const requestId = value?.trim();
+  if (!requestId || requestId.length > 128) return undefined;
+  return /^[A-Za-z0-9._:-]+$/.test(requestId) ? requestId : undefined;
+}
+
 export interface AppDependencies {
   config: AppConfig;
   database: Database;
@@ -174,6 +194,10 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
   const app = Fastify({
     trustProxy: true,
     loggerInstance: logger,
+    genReqId: request => validRequestId(headerValue(request.headers['x-request-id']))
+      ?? validRequestId(headerValue(request.headers['x-las-request-id']))
+      ?? validRequestId(headerValue(request.headers['x-client-request-id']))
+      ?? randomUUID(),
   });
   await app.register(cookie);
   await app.register(fastifyStatic, {
@@ -187,13 +211,18 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     reply.header('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
     return payload;
   });
+  app.addHook('onRequest', async (request, reply) => {
+    reply.header('x-request-id', request.id);
+    reply.header('x-las-request-id', request.id);
+  });
 
   const auth = new AuthService(database, config);
   const studioClient = new StudioAdminClient(app.log);
   const studioConnections = new StudioConnectionService(database, config, studioClient);
   const configGroups = new ConfigGroupService(database, config, studioConnections);
   const tickets = new TicketService(database, config, studioConnections);
-  const billing = new BillingService(database);
+  const billing = new BillingService(database, app.log);
+  const modelUsage = new ModelUsageService(database);
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof ZodError) {
@@ -210,10 +239,16 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
         err: error,
         errorCode: error.code,
         statusCode: error.statusCode,
+        requestId: request.id,
       };
       if (error.statusCode >= 500) request.log.error(logContext, 'request failed');
       else request.log.warn(logContext, 'request rejected');
-      void reply.status(error.statusCode).send({ code: error.code, message: error.message });
+      void reply.status(error.statusCode).send({
+        code: error.code,
+        message: error.message,
+        requestId: request.id,
+        ...(error.details === undefined ? {} : { data: error.details }),
+      });
       return;
     }
     const mysqlCode = (error as { code?: string }).code;
@@ -453,32 +488,108 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
 
   app.post('/api/admin/prices', async request => {
     const body = priceSchema.parse(request.body);
-    const actor = await auth.requireAdmin(request, body.appId === '*' ? undefined : body.appId);
+    const actor = await auth.requireAdmin(request, body.accountId);
     if (actor.role !== 'SYSTEM_ADMIN') {
-      throw new AppError('只有系统管理员可以配置平台默认价格', 403, 'SYSTEM_ADMIN_REQUIRED');
+      throw new AppError('只有系统管理员可以配置价格', 403, 'SYSTEM_ADMIN_REQUIRED');
     }
     await billing.upsertPrice({ ...body, actor });
     return { success: true };
   });
 
   app.get('/api/admin/prices', async request => {
-    const query = z.object({ appId: z.string().min(1).max(64) }).parse(request.query);
-    const actor = await auth.requireAdmin(request, query.appId);
-    const items = await billing.listPrices(query.appId) as Array<Record<string, unknown>>;
+    const query = z.object({
+      accountId: z.string().min(1).max(64),
+      scopeType: z.enum(['CONFIG_GROUP', 'PLATFORM']),
+      scopeId: z.string().min(1).max(64),
+    }).parse(request.query);
+    const actor = await auth.requireAdmin(request, query.accountId);
+    const [catalog, customCatalog, configuredResult] = await Promise.all([
+      studioConnections.billingCatalog(actor.accountId),
+      derivedCustomBillingCatalog(database, config, actor.accountId),
+      billing.listPrices(query.accountId, query.scopeType, query.scopeId) as Promise<{
+        scopeName: string;
+        items: Array<Record<string, unknown>>;
+      }>,
+    ]);
+    const configured = configuredResult.items;
+    const mergedCatalog = new Map<string, Record<string, unknown>>();
+    for (const item of catalog) {
+      mergedCatalog.set(`${item.billingItemId}\0${item.unit}`, { ...item, custom: false });
+    }
+    for (const item of customCatalog) {
+      mergedCatalog.set(`${item.billingItemId}\0${item.unit}`, { ...item });
+    }
+    const catalogItems = [...mergedCatalog.values()].sort((left, right) =>
+      String(left.billingItemId).localeCompare(String(right.billingItemId))
+      || String(left.unit).localeCompare(String(right.unit)));
+    const catalogKeys = new Set(catalogItems.map(item => `${item.billingItemId}\0${item.unit}`));
+    const items: Array<Record<string, unknown>> = catalogItems.flatMap(catalogItem => {
+      const matches = configured.filter(item => item.billingItemId === catalogItem.billingItemId
+        && item.unit === catalogItem.unit);
+      const records: Array<Record<string, unknown>> = matches.length > 0 ? matches : [{
+        scopeType: null,
+        scopeId: null,
+        scopeName: null,
+        billingItemId: catalogItem.billingItemId,
+        unit: catalogItem.unit,
+        customerUnitPrice: '0',
+        costUnitPrice: '0',
+        enabled: false,
+        configured: false,
+      }];
+      return records.map(item => ({
+        ...item,
+        ...catalogItem,
+        configured: matches.length > 0,
+        custom: Boolean(catalogItem.custom),
+      }));
+    });
+    for (const item of configured) {
+      if (catalogKeys.has(`${item.billingItemId}\0${item.unit}`)) continue;
+      items.push({
+        ...item,
+        operatorIds: [],
+        connectionNames: [],
+        configured: true,
+        custom: true,
+      });
+    }
     return {
+      scopeType: query.scopeType,
+      scopeId: query.scopeId,
+      scopeName: configuredResult.scopeName,
       items: actor.role === 'SYSTEM_ADMIN'
         ? items
         : items.map(({ costUnitPrice: _costUnitPrice, ...item }) => item),
     };
   });
 
+  app.get('/api/admin/billing-catalog', async request => {
+    const query = z.object({ accountId: z.string().min(1).max(64) }).parse(request.query);
+    await auth.requireAdmin(request, query.accountId);
+    const [catalog, customCatalog] = await Promise.all([
+      studioConnections.billingCatalog(query.accountId),
+      derivedCustomBillingCatalog(database, config, query.accountId),
+    ]);
+    const merged = new Map<string, Record<string, unknown>>();
+    for (const item of catalog) merged.set(`${item.billingItemId}\0${item.unit}`, { ...item, custom: false });
+    for (const item of customCatalog) merged.set(`${item.billingItemId}\0${item.unit}`, { ...item });
+    return {
+      items: [...merged.values()].sort((left, right) =>
+        String(left.billingItemId).localeCompare(String(right.billingItemId))
+        || String(left.unit).localeCompare(String(right.unit))),
+    };
+  });
+
   app.delete('/api/admin/prices', async request => {
     const body = z.object({
-      appId: z.string().min(1).max(64),
+      accountId: z.string().min(1).max(64),
+      scopeType: z.enum(['CONFIG_GROUP', 'PLATFORM']),
+      scopeId: z.string().min(1).max(64),
       billingItemId: z.string().min(1).max(128),
       unit: z.string().min(1).max(32),
     }).parse(request.body);
-    const actor = await auth.requireAdmin(request, body.appId === '*' ? undefined : body.appId);
+    const actor = await auth.requireAdmin(request, body.accountId);
     if (actor.role !== 'SYSTEM_ADMIN') {
       throw new AppError('只有系统管理员可以删除价格', 403, 'SYSTEM_ADMIN_REQUIRED');
     }
@@ -492,10 +603,23 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     if (actor.role !== 'SYSTEM_ADMIN') {
       throw new AppError('只有系统管理员可以批量配置价格', 403, 'SYSTEM_ADMIN_REQUIRED');
     }
+    const [catalog, customCatalog] = await Promise.all([
+      studioConnections.billingCatalog(actor.accountId).catch(() => []),
+      derivedCustomBillingCatalog(database, config, actor.accountId),
+    ]);
+    const merged = new Map<string, { billingItemId: string; unit: string }>();
+    for (const item of catalog) merged.set(`${item.billingItemId}\0${item.unit}`, item);
+    for (const item of customCatalog) merged.set(`${item.billingItemId}\0${item.unit}`, item);
+    const groups = (await configGroups.list(actor.accountId) as Array<{
+      configGroupId: string;
+      name: string;
+    }>);
+    const rows = [...merged.values()].flatMap(item => groups.map(group =>
+      `${item.billingItemId},${item.unit},${group.configGroupId},0,0`)).join('\n');
     return reply
       .type('text/csv; charset=utf-8')
       .header('content-disposition', 'attachment; filename="studio-prices.csv"')
-      .send('\uFEFFbillingItemId,unit,customerUnitPrice,costUnitPrice,platformDefault\nvideo-second,second,2,1,false\n');
+      .send(`\uFEFFbillingItemId,unit,configGroup,customerUnitPrice,costUnitPrice\n${rows}\n`);
   });
 
   app.post('/api/admin/prices/import', async request => {
@@ -507,8 +631,14 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     const rows = parseCsvRecords(body.csv);
     return importCsvRows(rows, async row => {
       const parsed = priceCsvRowSchema.parse(row);
+      const platformDefault = parsed.configGroup === '*' || parsed.configGroup === '平台默认';
+      const scopeId = platformDefault
+        ? '*'
+        : await configGroups.resolveAvailableGroupId(body.accountId, parsed.configGroup);
       await billing.upsertPrice({
-        appId: parsed.platformDefault ? '*' : body.accountId,
+        accountId: body.accountId,
+        scopeType: platformDefault ? 'PLATFORM' : 'CONFIG_GROUP',
+        scopeId,
         billingItemId: parsed.billingItemId,
         unit: parsed.unit,
         customerUnitPrice: parsed.customerUnitPrice,
@@ -537,6 +667,26 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
           ...summary,
           items: summary.items.map(({ cost_amount: _costAmount, ...item }) => item),
         };
+  });
+
+  app.get('/api/admin/model-usage', async request => {
+    const query = z.object({
+      accountId: z.string().min(1).max(64),
+      startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      mode: z.enum(['detail', 'summary']).default('detail'),
+      groupBy: z.enum(['billingItem', 'model', 'configGroup', 'subaccount', 'unit', 'status'])
+        .default('billingItem'),
+      billingItemId: z.string().max(128).optional(),
+      modelId: z.string().max(128).optional(),
+      configGroupId: z.string().max(64).optional(),
+      userId: z.string().max(64).optional(),
+      status: z.enum(['RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED']).optional(),
+      page: z.coerce.number().int().min(1).default(1),
+      pageSize: z.coerce.number().int().min(1).max(100).default(50),
+    }).parse(request.query);
+    const actor = await auth.requireAdmin(request, query.accountId);
+    return modelUsage.query(query, actor.role === 'SYSTEM_ADMIN');
   });
 
   app.post('/api/studio/tickets/launch', async request => {
@@ -577,6 +727,15 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     const appId = String(request.headers['x-app-id'] ?? '');
     const token = String(request.headers['x-las-api-key'] ?? '');
     const body = precheckSchema.parse(request.body) as BaselinePrecheckInput;
+    request.log.info({
+      event: 'studio_usage_precheck_received',
+      requestId: body.RequestId,
+      httpRequestId: request.id,
+      appId,
+      connectionId: query.connection_id,
+      userId: body.UserId,
+      itemCount: body.Items.length,
+    }, 'Studio usage precheck received');
     if (!await studioConnections.verifyCallbackToken(
       query.connection_id,
       appId,
@@ -586,7 +745,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
       throw new AppError('Studio 鉴权失败', 401, 'STUDIO_UNAUTHORIZED');
     }
     await billing.precheck(query.connection_id, appId, body);
-    return { code: 200, message: 'success' };
+    return { code: 200, message: 'success', requestId: body.RequestId };
   });
 
   app.post('/api/studio/baseline/tasks/callback', async request => {
@@ -594,6 +753,16 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     const appId = String(request.headers['x-app-id'] ?? '');
     const token = String(request.headers['x-las-api-key'] ?? '');
     const body = callbackSchema.parse(request.body) as BaselineCallbackInput;
+    request.log.info({
+      event: 'studio_usage_callback_received',
+      requestId: body.RequestId,
+      httpRequestId: request.id,
+      appId,
+      connectionId: query.connection_id,
+      userId: body.UserId,
+      status: body.Status,
+      itemCount: body.Items.length,
+    }, 'Studio usage callback received');
     if (!await studioConnections.verifyCallbackToken(
       query.connection_id,
       appId,
@@ -604,7 +773,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
       throw new AppError('Studio 鉴权失败', 401, 'STUDIO_UNAUTHORIZED');
     }
     await billing.callback(query.connection_id, appId, body);
-    return { code: 200, message: 'success' };
+    return { code: 200, message: 'success', requestId: body.RequestId };
   });
 
 

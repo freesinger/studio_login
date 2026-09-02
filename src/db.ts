@@ -45,7 +45,7 @@ export function createDatabase(config: AppConfig): Database {
   const pool = mysql.createPool({
     uri: config.STUDIO_LOGIN_DATABASE_URL.replace(/^mysql2:/, 'mysql:'),
     connectionLimit: config.STUDIO_LOGIN_DB_CONNECTION_LIMIT,
-    timezone: 'Z',
+    timezone: '+08:00',
     charset: 'utf8mb4',
     decimalNumbers: false,
   });

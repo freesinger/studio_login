@@ -39,6 +39,7 @@
         <button class="nav-item" data-section="configs" type="button">资源配置组</button>
         <button class="nav-item" data-section="users" type="button">企业子账号</button>
         <button class="nav-item system-admin-only" data-section="prices" type="button">价格配置</button>
+        <button class="nav-item" data-section="models" type="button">模型统计</button>
         <button class="nav-item" data-section="bills" type="button">账单</button>
       </nav>
       <div class="sidebar-footer">
@@ -68,18 +69,37 @@
       </section>
 
       <section id="section-configs" class="page-section hidden">
-        <div class="section-toolbar"><div><h2>资源配置组</h2><p>每个配置组绑定一个 Studio 连接和 Project ID；LAS、Ark 与 TOS 凭证仍保存在配置组中。</p></div><button id="new-config" class="primary compact" type="button">新建配置组</button></div>
+        <div class="section-toolbar"><div><h2>资源配置组</h2><p>每个配置组绑定一个 Studio 连接和 Project ID；月度额度由组内子账号共享，包含已结算和执行中预冻结金额。</p></div><button id="new-config" class="primary compact" type="button">新建配置组</button></div>
         <div id="config-list" class="card-list"></div>
       </section>
 
       <section id="section-users" class="page-section hidden">
-        <div class="section-toolbar"><div><h2>企业子账号</h2><p>创建 Studio 使用账号，并为每个账号分配一个已生效配置组。</p></div><div class="inline-actions"><button id="download-user-template" class="secondary compact" type="button">下载 CSV 模板</button><button id="import-users" class="secondary compact" type="button">CSV 导入</button><button id="new-user" class="primary compact" type="button">创建子账号</button><input id="user-csv-file" class="hidden" type="file" accept=".csv,text/csv"></div></div>
-        <div class="table-card"><div class="table-scroll"><table><thead><tr><th>用户</th><th>登录账号</th><th>密码</th><th>配置组</th><th>账期限额</th><th>状态 / 同步错误</th><th></th></tr></thead><tbody id="user-list"></tbody></table></div><div id="user-empty" class="empty hidden">暂时没有企业子账号。</div></div>
+        <div class="section-toolbar"><div><h2>企业子账号</h2><p>子账号限额按自然月统计；留空表示不设个人上限，但仍受所属配置组共享额度约束。</p></div><div class="inline-actions"><button id="download-user-template" class="secondary compact" type="button">下载 CSV 模板</button><button id="import-users" class="secondary compact" type="button">CSV 导入</button><button id="new-user" class="primary compact" type="button">创建子账号</button><input id="user-csv-file" class="hidden" type="file" accept=".csv,text/csv"></div></div>
+        <div class="table-card"><div class="table-scroll"><table class="user-table"><thead><tr><th>登录账号</th><th>配置组</th><th>个人配额</th><th>已结算</th><th>预冻结</th><th>可用</th><th>状态</th><th></th></tr></thead><tbody id="user-list"></tbody></table></div><div id="user-empty" class="empty hidden">暂时没有企业子账号。</div></div>
       </section>
 
       <section id="section-prices" class="page-section hidden system-admin-only">
-        <div class="section-toolbar"><div><h2>价格配置</h2><p>维护计费项客户单价与内部成本单价。历史任务使用创建时的价格快照。</p></div><div class="inline-actions"><button id="download-price-template" class="secondary compact" type="button">下载 CSV 模板</button><button id="import-prices" class="secondary compact" type="button">CSV 导入</button><button id="new-price" class="primary compact" type="button">配置价格</button><input id="price-csv-file" class="hidden" type="file" accept=".csv,text/csv"></div></div>
-        <div class="table-card"><div class="table-scroll"><table><thead><tr><th>计费项</th><th>单位</th><th>作用范围</th><th>客户单价</th><th>成本单价</th><th>状态</th><th></th></tr></thead><tbody id="price-list"></tbody></table></div><div id="price-empty" class="empty hidden">暂时没有价格配置。</div></div>
+        <div class="section-toolbar"><div><h2>价格配置</h2><p>价格按配置组生效；历史任务使用创建时的价格快照。</p></div><div class="inline-actions"><label class="inline-field price-scope-filter">作用范围<select id="price-scope-filter"></select></label><button id="add-price" class="primary compact" type="button">新增价格</button><button id="download-price-template" class="secondary compact" type="button">下载 CSV 模板</button><button id="import-prices" class="secondary compact" type="button">CSV 导入</button><input id="price-csv-file" class="hidden" type="file" accept=".csv,text/csv"></div></div>
+        <div class="table-card"><div class="table-scroll"><table><thead><tr><th>计费项</th><th>单位</th><th>客户单价</th><th>成本单价</th><th>状态</th><th></th></tr></thead><tbody id="price-list"></tbody></table></div><div id="price-empty" class="empty hidden">当前作用范围暂时没有价格配置。</div></div>
+      </section>
+
+      <section id="section-models" class="page-section hidden">
+        <p class="muted model-description">按 Studio 上报的计费项查看调用、用量和金额。</p>
+        <div class="table-card"><div class="form-grid model-filters">
+          <label>开始日期<input id="model-start-date" type="date"></label><label>结束日期<input id="model-end-date" type="date"></label>
+          <label>展示方式<select id="model-mode"><option value="detail">明细</option><option value="summary">汇总</option></select></label>
+          <label>计费项<select id="model-billing-item"><option value="">全部</option></select></label>
+          <label>配置组<select id="model-config-group"><option value="">全部</option></select></label><label>子账号<select id="model-user"><option value="">全部</option></select></label>
+          <label>状态<select id="model-status"><option value="">全部</option><option value="RUNNING">执行中</option><option value="SUCCEEDED">成功</option><option value="FAILED">失败</option><option value="CANCELLED">已取消</option></select></label>
+          <div class="inline-actions"><button id="model-search" class="primary compact" type="button">查询</button></div>
+        </div></div>
+        <div class="stats-grid bill-stats">
+          <article class="stat-card"><span>调用数</span><strong id="model-call-count">0</strong></article>
+          <article class="stat-card"><span>用量</span><strong id="model-usage-total">0</strong></article>
+          <article class="stat-card"><span>客户金额</span><strong id="model-customer-amount">0.00</strong><small>CNY</small></article>
+          <article class="stat-card system-admin-only"><span>内部成本</span><strong id="model-cost-amount">0.00</strong><small>CNY</small></article>
+        </div>
+        <div class="table-card"><div class="table-scroll"><table><thead><tr id="model-head"></tr></thead><tbody id="model-list"></tbody></table></div><div id="model-empty" class="empty hidden">当前筛选范围暂无计费用量。</div><div class="inline-actions"><button id="model-prev" class="secondary compact" type="button">上一页</button><span id="model-page">第 1 页</span><button id="model-next" class="secondary compact" type="button">下一页</button></div></div>
       </section>
 
       <section id="section-bills" class="page-section hidden">
@@ -115,7 +135,8 @@
       <div class="form-grid">
         <label>Studio 连接<select name="connectionId" id="config-connection" required></select></label>
         <label>配置组名称<input name="projectId" maxlength="128" required></label>
-        <label>账期硬上限（CNY，可选）<input name="monthlyLimit" inputmode="decimal" placeholder="不填写表示不限额"></label>
+        <label>配置组月度共享上限（CNY，可选）<input name="monthlyLimit" inputmode="decimal" placeholder="不填写表示不限额"><span class="muted">按北京时间自然月重置；组内所有子账号共同占用。</span></label>
+        <label class="checkbox-row"><input name="projectLevelSharing" type="checkbox"><span>开启数据共享（同 Project 子账号共享资源数据）</span></label>
         <label class="checkbox-row" id="config-default-field"><input name="isDefault" type="checkbox"><span>设为默认配置组</span></label>
       </div>
       <section class="resource-config-section">
@@ -124,7 +145,8 @@
           <label>Ark API Key<input name="arkApiKey" type="text" autocomplete="off"></label>
           <label>Bucket<input name="tosBucketName" maxlength="128"></label>
         </div></div>
-        <div id="config-json-panel" class="form-section hidden"><h3>必填资源配置</h3><p class="muted">导入资源配置 JSON，仅需包含 LAS API Key、Ark API Key 与 Bucket 三项；部署 Region 与 TOS Region 以所选 Studio 连接为准。</p><textarea name="resourceJson" rows="10" spellcheck="false" placeholder='{"lasApiKey":"...","arkApiKey":"...","tosBucketName":"..."}'></textarea></div>
+        <div id="config-json-panel" class="form-section hidden"><h3>完整资源配置</h3><p class="muted">可导入完整的资源配置 JSON；部署 Region 与 TOS Region 仍以所选 Studio 连接为准。</p><textarea name="resourceJson" rows="10" spellcheck="false" placeholder='{"lasApiKey":"...","arkApiKey":"...","tosBucketName":"..."}'></textarea></div>
+        <div class="form-section"><h3>自定义模型配置（可选）</h3><p class="muted">粘贴一个 JSON 对象，可包含 customImageModelConfigs、customLlmModelConfigs、customModels 三项。</p><textarea name="customModelJson" rows="8" spellcheck="false" placeholder='{"customImageModelConfigs":[],"customLlmModelConfigs":[],"customModels":[]}'></textarea></div>
       </section>
       <p class="message form-message" aria-live="polite"></p>
       <div class="dialog-actions"><button class="secondary close-dialog" type="button">取消</button><button class="primary compact" type="submit">保存并生效</button></div>
@@ -139,9 +161,9 @@
       <label>显示名称<input name="displayName" required maxlength="128"></label>
       <label>登录账号<input name="loginName" required minlength="3" maxlength="64" autocomplete="off"></label>
       <label>密码<span class="secret-input"><input name="password" type="password" required minlength="8" maxlength="128" autocomplete="off"><button id="toggle-user-password" class="secret-toggle" type="button" aria-label="显示密码">查看</button></span><span class="muted" id="user-password-help">创建时必填</span></label>
-      <label>账期硬上限（CNY，可选）<input name="monthlyLimit" inputmode="decimal"></label>
+      <label>子账号月度上限（CNY，可选）<input name="monthlyLimit" inputmode="decimal" placeholder="不填写表示不设个人上限"><span class="muted" id="user-limit-help">仍受所选配置组的月度共享上限约束。</span></label>
       <p class="message form-message" aria-live="polite"></p>
-      <div class="dialog-actions"><button class="secondary close-dialog" type="button">取消</button><button class="primary compact" type="submit">创建账号</button></div>
+      <div class="dialog-actions"><button class="secondary close-dialog" type="button">取消</button><button id="user-submit" class="primary compact" type="submit">创建账号</button></div>
     </form>
   </dialog>
 
@@ -156,18 +178,19 @@
 
   <dialog id="price-dialog" class="modal small-modal">
     <form id="price-form" class="dialog-form">
-      <div class="dialog-header"><div><p class="eyebrow">计费规则</p><h2 id="price-dialog-title">配置价格</h2></div><button class="icon-button close-dialog" type="button">关闭</button></div>
+      <div class="dialog-header"><div class="dialog-heading"><p class="eyebrow">计费规则</p><h2 id="price-dialog-title">配置价格</h2></div><button class="icon-button close-dialog" type="button">关闭</button></div>
       <input id="price-edit-mode" type="hidden">
-      <label>计费项 ID<input name="billingItemId" required maxlength="128" placeholder="例如：video-second"></label>
-      <label>计费单位<input name="unit" required maxlength="32" placeholder="例如：second"></label>
-      <label>客户单价<input name="customerUnitPrice" required inputmode="decimal" value="0"></label>
-      <label>内部成本单价<input name="costUnitPrice" required inputmode="decimal" value="0"></label>
-      <label class="checkbox-row"><input name="platformDefault" type="checkbox"><span>设为平台默认价格（所有应用兜底）</span></label>
+      <label>计费项 ID<input name="billingItemId" required maxlength="128" placeholder="例如 custom_model_token"></label>
+      <label>计费单位<input name="unit" required maxlength="32" placeholder="例如 token / request / second"></label>
+      <label>作用范围<select name="scopeId" id="price-scope" required></select><span class="muted">价格优先匹配配置组；平台默认仅作为未配置组价格时的兜底。</span></label>
+      <label>客户单价<input name="customerUnitPrice" required inputmode="decimal" step="0.01" value="0.00"></label>
+      <label>内部成本单价<input name="costUnitPrice" required inputmode="decimal" step="0.01" value="0.00"></label>
       <p class="message form-message" aria-live="polite"></p>
       <div class="dialog-actions"><button class="secondary close-dialog" type="button">取消</button><button class="primary compact" type="submit">保存价格</button></div>
     </form>
   </dialog>
 
+  <div id="user-action-menu" class="user-action-menu hidden" role="menu"></div>
   <div id="toast" class="toast hidden" role="status"></div>
   <script src="/app.js" defer></script>
 </body>
