@@ -1,0 +1,37 @@
+{
+  "name": "studio-login",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "db:check": "tsx scripts/check-database.ts",
+    "check:sensitive": "tsx scripts/check-sensitive-content.ts"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/static": "^10.1.3",
+    "bcryptjs": "^3.0.2",
+    "csv-parse": "^6.2.1",
+    "decimal.js": "^10.6.0",
+    "dotenv": "^17.2.2",
+    "fastify": "^5.6.0",
+    "mysql2": "^3.14.5",
+    "pino": "^10.3.1",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
