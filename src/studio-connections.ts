@@ -448,6 +448,18 @@ export class StudioConnectionService {
     return this.studioClient.getDeploymentProfile(this.connectionFromRow(row), row.app_id);
   }
 
+  async resourceProfile(
+    accountId: string,
+    connectionId: string,
+    projectId: string,
+  ): Promise<ResourceConfig> {
+    const row = await this.requireReadyRowById(accountId, connectionId);
+    return this.studioClient.getResourceProfile(this.connectionFromRow(row), {
+      appId: row.app_id,
+      projectId,
+    });
+  }
+
   async billingCatalog(accountId: string): Promise<BillingCatalogItem[]> {
     const rows = await this.database.query<ConnectionRow>(
       `SELECT * FROM studio_registrations
@@ -749,7 +761,8 @@ export class StudioConnectionService {
     return this.resourceLasApiKeyFromQuery(
       `SELECT v.encrypted_config
          FROM users u
-         JOIN config_groups g ON g.config_group_id = u.config_group_id AND g.account_id = u.account_id
+         JOIN user_config_group_bindings b ON b.user_id = u.user_id
+         JOIN config_groups g ON g.config_group_id = b.config_group_id AND g.account_id = u.account_id
          JOIN studio_registrations r ON r.connection_id = g.connection_id
          JOIN config_group_versions v ON v.config_group_id = g.config_group_id
           AND v.version = g.current_version

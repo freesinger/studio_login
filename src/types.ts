@@ -20,7 +20,5 @@ export interface ResourceConfig {
   tosEndpoint?: string;
   outputTosPath?: string;
   region?: string;
-  customImageModelConfigs?: unknown;
-  customLlmModelConfigs?: unknown;
   customModels?: unknown;
 }

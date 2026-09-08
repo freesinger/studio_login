@@ -70,6 +70,7 @@ export const requiredDatabaseColumns = {
   ],
   studio_task_items: [
     'task_id',
+    'item_index',
     'billing_item_id',
     'model_id',
     'estimated_usage',
@@ -79,6 +80,7 @@ export const requiredDatabaseColumns = {
     'status',
   ],
   period_usage: ['app_id', 'subject_type', 'subject_id', 'billing_period', 'reserved_amount', 'actual_amount'],
+  user_config_group_bindings: ['user_id', 'config_group_id', 'is_default', 'monthly_limit'],
   api_rate_limits: ['action', 'subject_key', 'window_started_at', 'request_count'],
 } as const;
 

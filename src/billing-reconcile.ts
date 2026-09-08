@@ -28,6 +28,7 @@ interface RemoteUsageItem {
 interface RemoteUsageRequest {
   RequestId: string;
   UserId: string;
+  ProjectId?: string;
   Status: 'PROCESSING' | 'SUCCEEDED' | 'FAILED';
   Items: RemoteUsageItem[];
 }
@@ -79,6 +80,7 @@ function parseRemoteUsage(payload: unknown, requestId: string): RemoteUsageReque
   return {
     RequestId: requestId,
     UserId: readString(remote.UserId),
+    ...(readString(remote.ProjectId) ? { ProjectId: readString(remote.ProjectId) } : {}),
     Status: status as RemoteUsageRequest['Status'],
     Items: items,
   };
@@ -190,6 +192,7 @@ export class BillingReconciler {
         const callback: BaselineCallbackInput = {
           RequestId: task.request_id,
           UserId: task.login_name,
+          ...(remote.ProjectId ? { ProjectId: remote.ProjectId } : {}),
           Status: remote.Status,
           Items: remote.Items,
         };

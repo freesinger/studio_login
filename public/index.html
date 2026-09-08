@@ -22,12 +22,28 @@
       <form id="login-form" class="stack-form">
         <p class="eyebrow">企业工作台</p>
         <h2>登录</h2>
-        <p class="muted">管理员进入管理工作台，企业子账号进入 Studio。</p>
+        <p class="muted">管理员进入管理工作台，企业子账号登录后选择 Project 打开 Studio。</p>
         <label>登录账号<input name="loginName" required autocomplete="username"></label>
         <label>密码<input name="password" type="password" required autocomplete="current-password"></label>
         <button class="primary" type="submit">登录</button>
       </form>
       <p class="message" id="login-message" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <main id="project-view" class="login-shell hidden">
+    <section class="login-intro">
+      <div class="brand"><span class="logo">S</span><span>LAS Studio</span></div>
+      <h1>选择要进入的 Project</h1>
+      <p>当前登录页会保留，Studio 将在新窗口打开；需要切换 Project 时回到这里重新选择。</p>
+    </section>
+    <section class="login-card">
+      <p class="eyebrow">Project 选择</p>
+      <h2>进入 Studio</h2>
+      <p class="muted" id="project-user">请选择有权限的 Project。</p>
+      <div id="project-list" class="card-list"></div>
+      <div class="dialog-actions"><button id="project-logout" class="secondary" type="button">退出登录</button></div>
+      <p class="message" id="project-message" aria-live="polite"></p>
     </section>
   </main>
 
@@ -145,8 +161,8 @@
           <label>Ark API Key<input name="arkApiKey" type="text" autocomplete="off"></label>
           <label>Bucket<input name="tosBucketName" maxlength="128"></label>
         </div></div>
-        <div id="config-json-panel" class="form-section hidden"><h3>完整资源配置</h3><p class="muted">可导入完整的资源配置 JSON；部署 Region 与 TOS Region 仍以所选 Studio 连接为准。</p><textarea name="resourceJson" rows="10" spellcheck="false" placeholder='{"lasApiKey":"...","arkApiKey":"...","tosBucketName":"..."}'></textarea></div>
-        <div class="form-section"><h3>自定义模型配置（可选）</h3><p class="muted">粘贴一个 JSON 对象，可包含 customImageModelConfigs、customLlmModelConfigs、customModels 三项。</p><textarea name="customModelJson" rows="8" spellcheck="false" placeholder='{"customImageModelConfigs":[],"customLlmModelConfigs":[],"customModels":[]}'></textarea></div>
+        <div id="config-json-panel" class="form-section hidden"><h3>完整资源配置</h3><p class="muted">粘贴 Studio 设置导入/导出的完整 JSON 即可直接使用；页面保存时只会提取资源与自定义模型字段，部署 Region 与 TOS Region 仍以所选 Studio 连接为准。</p><textarea name="resourceJson" rows="14" spellcheck="false" placeholder='{"version":1,"las":{"apiKey":"..."},"models":{"arkImage":{"apiKey":"..."},"custom":[]},"tos":{"bucketName":"..."}}'></textarea></div>
+        <div id="custom-model-panel" class="form-section"><div class="custom-model-section-header"><div><h3>自定义模型配置（可选）</h3><p class="muted">按 Studio 自定义模型配置录入；保存时只写入 customModels，模型类型决定后续调用路径。</p></div><button id="add-custom-model" class="secondary compact" type="button">+ 添加自定义模型</button></div><div id="custom-model-list" class="custom-model-list"></div><div id="custom-model-empty" class="empty compact-empty">暂未添加自定义模型。</div></div>
       </section>
       <p class="message form-message" aria-live="polite"></p>
       <div class="dialog-actions"><button class="secondary close-dialog" type="button">取消</button><button class="primary compact" type="submit">保存并生效</button></div>
@@ -157,11 +173,14 @@
     <form id="user-form" class="dialog-form">
       <div class="dialog-header"><div><p class="eyebrow">用户授权</p><h2 id="user-dialog-title">创建企业子账号</h2></div><button class="icon-button close-dialog" type="button">关闭</button></div>
       <input id="user-id" type="hidden">
-      <label>资源配置组<select name="configGroupId" id="user-config-group" required></select></label>
+      <section class="form-section">
+        <div class="section-toolbar compact-toolbar"><div><h3>配置组授权</h3><p class="muted">每个配置组可单独设置该子账号月度上限。</p></div><button id="add-user-binding" class="secondary compact" type="button">添加配置组</button></div>
+        <div id="user-binding-list" class="binding-list"></div>
+      </section>
       <label>显示名称<input name="displayName" required maxlength="128"></label>
       <label>登录账号<input name="loginName" required minlength="3" maxlength="64" autocomplete="off"></label>
       <label>密码<span class="secret-input"><input name="password" type="password" required minlength="8" maxlength="128" autocomplete="off"><button id="toggle-user-password" class="secret-toggle" type="button" aria-label="显示密码">查看</button></span><span class="muted" id="user-password-help">创建时必填</span></label>
-      <label>子账号月度上限（CNY，可选）<input name="monthlyLimit" inputmode="decimal" placeholder="不填写表示不设个人上限"><span class="muted" id="user-limit-help">仍受所选配置组的月度共享上限约束。</span></label>
+      <p class="muted" id="user-limit-help">子账号月度上限按配置组分别生效，并仍受对应配置组共享上限约束。</p>
       <p class="message form-message" aria-live="polite"></p>
       <div class="dialog-actions"><button class="secondary close-dialog" type="button">取消</button><button id="user-submit" class="primary compact" type="submit">创建账号</button></div>
     </form>
@@ -183,8 +202,8 @@
       <label>计费项 ID<input name="billingItemId" required maxlength="128" placeholder="例如 custom_model_token"></label>
       <label>计费单位<input name="unit" required maxlength="32" placeholder="例如 token / request / second"></label>
       <label>作用范围<select name="scopeId" id="price-scope" required></select><span class="muted">价格优先匹配配置组；平台默认仅作为未配置组价格时的兜底。</span></label>
-      <label>客户单价<input name="customerUnitPrice" required inputmode="decimal" step="0.01" value="0.00"></label>
-      <label>内部成本单价<input name="costUnitPrice" required inputmode="decimal" step="0.01" value="0.00"></label>
+      <label>客户单价<input name="customerUnitPrice" required inputmode="decimal" step="0.0000000001" value="0"></label>
+      <label>内部成本单价<input name="costUnitPrice" required inputmode="decimal" step="0.0000000001" value="0"></label>
       <p class="message form-message" aria-live="polite"></p>
       <div class="dialog-actions"><button class="secondary close-dialog" type="button">取消</button><button class="primary compact" type="submit">保存价格</button></div>
     </form>

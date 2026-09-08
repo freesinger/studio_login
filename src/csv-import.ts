@@ -22,7 +22,7 @@ export function parseCsvRecords(csv: string): Record<string, string>[] {
     rows = parse(csv, {
       bom: true,
       columns: true,
-      relax_column_count: false,
+      relax_column_count: true,
       skip_empty_lines: true,
       trim: true,
     }) as Record<string, string>[];
