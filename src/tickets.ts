@@ -34,26 +34,40 @@ export class TicketService {
     private readonly studioConnections: StudioConnectionService,
   ) {}
 
-  async launch(actor: Actor): Promise<{ launchUrl: string; expiresAt: string }> {
+  async launch(
+    actor: Actor,
+    connectionId?: string,
+    configGroup?: string,
+  ): Promise<{ launchUrl: string; expiresAt: string }> {
     if (actor.role !== 'SUBACCOUNT') {
       throw new AppError('管理员账号仅用于管理，请使用企业子账号进入 Studio', 403, 'STUDIO_CREATOR_ACCOUNT_REQUIRED');
     }
     const rows = await this.database.query<LaunchRow>(
-      `SELECT u.status, u.login_name, u.config_group_id, u.profile_sync_version, g.current_version,
+      `SELECT u.status, u.login_name, b.config_group_id, b.profile_sync_version, g.current_version,
               g.connection_id, g.project_id, r.status AS registration_status,
               r.app_id AS connection_app_id
          FROM users u
-         LEFT JOIN config_groups g ON g.config_group_id = u.config_group_id
-         LEFT JOIN studio_registrations r ON r.connection_id = g.connection_id
-        WHERE u.user_id = ? AND u.account_id = ?`,
-      [actor.userId, actor.accountId],
+         JOIN user_config_group_bindings b ON b.user_id = u.user_id
+         JOIN config_groups g ON g.config_group_id = b.config_group_id
+         JOIN studio_registrations r ON r.connection_id = g.connection_id
+        WHERE u.user_id = ? AND u.account_id = ?
+          AND (? IS NULL OR g.connection_id = ?)
+          AND (? IS NULL OR g.name = ? OR g.project_id = ?)`,
+      [
+        actor.userId,
+        actor.accountId,
+        connectionId ?? null,
+        connectionId ?? null,
+        configGroup ?? null,
+        configGroup ?? null,
+        configGroup ?? null,
+      ],
     );
     const row = rows[0];
     if (!row || row.status !== 'ACTIVE' || row.registration_status !== 'READY') {
       throw new AppError('账号或 Studio 配置未就绪', 409, 'STUDIO_LOGIN_NOT_READY');
     }
-    if (!row.config_group_id || !row.connection_id || !row.project_id || !row.connection_app_id
-        || Number(row.profile_sync_version) !== Number(row.current_version)) {
+    if (!row.config_group_id || !row.connection_id || !row.project_id || !row.connection_app_id) {
       throw new AppError('资源配置尚未同步', 409, 'PROFILE_NOT_SYNCED');
     }
 
@@ -101,8 +115,10 @@ export class TicketService {
         `SELECT t.user_id, t.app_id, u.login_name, u.account_id, t.project_id
            FROM studio_login_tickets t
            JOIN users u ON u.user_id = t.user_id
-           JOIN config_groups g ON g.config_group_id = u.config_group_id
+           JOIN user_config_group_bindings b ON b.user_id = u.user_id
+           JOIN config_groups g ON g.config_group_id = b.config_group_id
              AND g.connection_id = t.connection_id
+             AND g.project_id = t.project_id
            JOIN studio_registrations r ON r.connection_id = t.connection_id
           WHERE t.ticket_hash = ?
             AND t.connection_id = ?

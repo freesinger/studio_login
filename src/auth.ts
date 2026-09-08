@@ -127,6 +127,8 @@ export class AuthService {
     loginName: string;
     password: string;
     clientIp: string;
+    connectionId?: string;
+    configGroup?: string;
   }): Promise<{ token: string; actor: Actor; expiresAt: string }> {
     await assertRateLimit(this.database, {
       action: 'login',
@@ -142,7 +144,6 @@ export class AuthService {
     if (row.user_status !== 'ACTIVE' || row.account_status !== 'READY') {
       throw new AppError('账号已停用', 403, 'ACCOUNT_DISABLED');
     }
-
     const token = randomToken();
     const expiresAt = new Date(Date.now() + this.config.STUDIO_LOGIN_SESSION_TTL_SECONDS * 1000);
     await this.database.execute(

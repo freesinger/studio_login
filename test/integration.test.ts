@@ -257,8 +257,6 @@ describe('studio-login MVP', () => {
           tosUploadPrefix: 'uploads/',
           tosEndpoint: 'https://tos.example.com',
           outputTosPath: 'tos://studio-login-test/output/',
-          customImageModelConfigs: [{ id: 'image-model' }],
-          customLlmModelConfigs: [{ id: 'llm-model' }],
           customModels: [{ name: 'custom-model', type: 'IMAGE' }],
         },
       },
@@ -352,8 +350,6 @@ describe('studio-login MVP', () => {
         tosUploadPrefix: 'uploads/',
         tosEndpoint: 'https://tos.example.com',
         outputTosPath: 'tos://studio-login-test/output/',
-        customImageModelConfigs: [{ id: 'image-model' }],
-        customLlmModelConfigs: [{ id: 'llm-model' }],
         customModels: [{ name: 'custom-model', type: 'IMAGE' }],
       }),
     });
@@ -450,8 +446,8 @@ describe('studio-login MVP', () => {
       scopeId: configGroupId,
       scopeName: 'acc_demo',
       billingItemId: 'video-second',
-      customerUnitPrice: '2.00000000',
-      costUnitPrice: '1.00000000',
+      customerUnitPrice: '2.0000000000',
+      costUnitPrice: '1.0000000000',
     });
 
     const subaccountTemplate = await app.inject({
@@ -509,7 +505,9 @@ describe('studio-login MVP', () => {
       headers: { cookie: adminCookie },
       payload: {
         accountId: 'acc_demo',
-        csv: `billingItemId,unit,configGroup,customerUnitPrice,costUnitPrice\nimage,count,${configGroupId},3,1.5\n`,
+        scopeType: 'CONFIG_GROUP',
+        scopeId: configGroupId,
+        csv: 'billingItemId,unit,customerUnitPrice,costUnitPrice\nimage,count,3,1.5\n',
       },
     });
     expect(priceImport.statusCode).toBe(200);

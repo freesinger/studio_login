@@ -6,6 +6,7 @@ const state = {
   users: [],
   prices: [],
   billingCatalog: [],
+  loginProjects: [],
   modelPage: 1,
 };
 
@@ -41,11 +42,18 @@ const manualResourceFieldNames = [
   'tosBucketName',
 ];
 
-const customModelFieldNames = [
-  'customImageModelConfigs',
-  'customLlmModelConfigs',
-  'customModels',
-];
+const customModelFieldNames = ['customModels'];
+
+const customModelTypes = {
+  IMAGE: 'Image',
+  LANGUAGE: 'Language',
+  ELEVENLABS: 'ElevenLabs',
+};
+
+const customImageRatios = ['16:9', '9:16', '1:1', '4:3', '3:4'];
+const customImageResolutions = ['1K', '1.5K', '2K', '3K', '4K'];
+const defaultCustomImageRatios = ['16:9', '9:16', '1:1', '4:3'];
+const defaultCustomImageResolutions = ['1K', '1.5K', '2K', '3K'];
 
 const optionalResourceFieldNames = [
   'lasBaseUrl',
@@ -154,20 +162,434 @@ function formatMoney(value) {
     : '0.00';
 }
 
-async function enterStudio() {
-  setText('#login-message', '正在创建一次性登录凭证并进入 Studio…');
-  const result = await api('/api/studio/tickets/launch', { method: 'POST', body: '{}' });
-  window.location.assign(result.launchUrl);
+function formatPrice(value) {
+  const parsed = Number(value || 0);
+  if (!Number.isFinite(parsed)) return '0';
+  return parsed.toFixed(10).replace(/\.?0+$/, '');
+}
+
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readStringValue(...values) {
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (trimmed) return trimmed;
+  }
+  return '';
+}
+
+function normalizeCustomModelType(value, fallback = 'LANGUAGE') {
+  const type = String(value || '').trim().toUpperCase();
+  if (type === 'IMAGE') return 'IMAGE';
+  if (type === 'LANGUAGE' || type === 'LLM' || type === 'TEXT') return 'LANGUAGE';
+  if (type === 'ELEVENLABS' || type === 'ELEVEN_LABS') return 'ELEVENLABS';
+  const fallbackType = String(fallback || '').trim().toUpperCase();
+  if (fallbackType === 'IMAGE') return 'IMAGE';
+  if (fallbackType === 'ELEVENLABS' || fallbackType === 'ELEVEN_LABS') return 'ELEVENLABS';
+  return 'LANGUAGE';
+}
+
+function uniqueKnownValues(values, allowedValues) {
+  if (!Array.isArray(values)) return [];
+  const allowed = new Set(allowedValues);
+  return [...new Set(values
+    .map(value => typeof value === 'string' ? value.trim() : '')
+    .filter(value => allowed.has(value)))];
+}
+
+function defaultCustomModel(type = 'LANGUAGE', index = 0) {
+  const normalizedType = normalizeCustomModelType(type);
+  return {
+    name: `自定义模型 ${index + 1}`,
+    type: normalizedType,
+    model: '',
+    endpoint: '',
+    apiKey: '',
+    ...(normalizedType === 'IMAGE'
+      ? {
+        imageRatios: [...defaultCustomImageRatios],
+        imageResolutions: [...defaultCustomImageResolutions],
+      }
+      : {
+        imageRatios: undefined,
+        imageResolutions: undefined,
+      }),
+  };
+}
+
+function normalizeCustomModelConfig(input, fallbackType = 'LANGUAGE', index = 0) {
+  if (!isPlainObject(input)) return null;
+  const type = normalizeCustomModelType(input.type ?? input.modelType, fallbackType);
+  const model = readStringValue(input.model, input.modelId, input.id, input.modelName, input.name);
+  const name = readStringValue(input.name, input.modelName, input.displayName, model, `自定义模型 ${index + 1}`);
+  const config = {
+    name,
+    type,
+    model,
+    endpoint: readStringValue(input.endpoint, input.baseUrl, input.baseURL),
+    apiKey: readStringValue(input.apiKey),
+  };
+  if (type === 'IMAGE') {
+    config.imageRatios = uniqueKnownValues(input.imageRatios ?? input.imageRatiosSelected, customImageRatios);
+    config.imageResolutions = uniqueKnownValues(
+      input.imageResolutions ?? (input.imageResolution ? [input.imageResolution] : undefined),
+      customImageResolutions,
+    );
+  }
+  if (input.verified === 'pass' || input.verified === 'unpass') config.verified = input.verified;
+  return config;
+}
+
+function normalizeCustomModelsFromConfig(config) {
+  if (!isPlainObject(config)) return [];
+  let models = [];
+  if (Array.isArray(config.customModels)) {
+    models = config.customModels
+      .map((item, index) => normalizeCustomModelConfig(item, item?.type, index))
+      .filter(Boolean);
+  }
+  if (isPlainObject(config.models)) {
+    if (Array.isArray(config.models.custom)) {
+      models = config.models.custom
+        .map((item, index) => normalizeCustomModelConfig(item, item?.type, index))
+        .filter(Boolean);
+    }
+  }
+  return models.map((model, index) => ({
+    ...defaultCustomModel(model.type, index),
+    ...model,
+    ...(model.type === 'IMAGE'
+      ? {
+        imageRatios: model.imageRatios?.length ? model.imageRatios : [...defaultCustomImageRatios],
+        imageResolutions: model.imageResolutions?.length ? model.imageResolutions : [...defaultCustomImageResolutions],
+      }
+      : {
+        imageRatios: undefined,
+        imageResolutions: undefined,
+      }),
+  }));
+}
+
+function resourceCustomModelFields(models) {
+  const customModels = models.map(model => {
+    const type = normalizeCustomModelType(model.type);
+    const item = {
+      ...(model.id ? { id: model.id } : {}),
+      name: model.name.trim(),
+      type,
+      model: model.model.trim(),
+      endpoint: model.endpoint.trim(),
+      apiKey: model.apiKey.trim(),
+      ...(model.verified ? { verified: model.verified } : {}),
+    };
+    if (type === 'IMAGE') {
+      item.imageRatios = uniqueKnownValues(model.imageRatios, customImageRatios);
+      item.imageResolutions = uniqueKnownValues(model.imageResolutions, customImageResolutions);
+    }
+    return item;
+  });
+  return { customModels };
+}
+
+function studioSettingsJsonFromResourceConfig(config) {
+  const models = normalizeCustomModelsFromConfig(config);
+  return {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    las: {
+      apiKey: config.lasApiKey || '',
+    },
+    models: {
+      arkImage: {
+        apiKey: config.arkApiKey || '',
+      },
+      custom: models.map(model => ({
+        ...(model.apiKey ? { apiKey: model.apiKey } : { apiKey: '' }),
+        ...(model.endpoint ? { endpoint: model.endpoint } : { endpoint: '' }),
+        ...(model.id ? { id: model.id } : {}),
+        model: model.model || '',
+        name: model.name || '',
+        type: normalizeCustomModelType(model.type),
+        ...(model.type === 'IMAGE'
+          ? {
+            imageResolutions: uniqueKnownValues(model.imageResolutions, customImageResolutions),
+            imageRatios: uniqueKnownValues(model.imageRatios, customImageRatios),
+          }
+          : {}),
+      })),
+    },
+    region: config.region || config.tosRegion || '',
+    tos: {
+      accessKey: config.tosAccessKey || '',
+      bucketName: config.tosBucketName || '',
+      endpoint: config.tosEndpoint || '',
+      secretKey: config.tosSecretKey || '',
+      sessionToken: '',
+    },
+  };
+}
+
+function normalizeImportedResourceConfig(input) {
+  if (!isPlainObject(input)) throw new Error('资源 JSON 必须是对象');
+  const config = {};
+  for (const name of resourceFieldNames) {
+    const value = typeof input[name] === 'string' ? input[name].trim() : input[name];
+    if (value !== undefined && value !== null && value !== '') config[name] = value;
+  }
+  if (isPlainObject(input.las)) {
+    const apiKey = readStringValue(input.las.apiKey);
+    if (apiKey) config.lasApiKey = apiKey;
+  }
+  if (isPlainObject(input.tos)) {
+    const bucketName = readStringValue(input.tos.bucketName, input.tos.tosBucketName);
+    const endpoint = readStringValue(input.tos.endpoint, input.tos.tosEndpoint);
+    const accessKey = readStringValue(input.tos.accessKey, input.tos.tosAccessKey);
+    const secretKey = readStringValue(input.tos.secretKey, input.tos.tosSecretKey);
+    if (bucketName) config.tosBucketName = bucketName;
+    if (endpoint) config.tosEndpoint = endpoint;
+    if (accessKey) config.tosAccessKey = accessKey;
+    if (secretKey) config.tosSecretKey = secretKey;
+  }
+  if (isPlainObject(input.models)) {
+    const arkApiKey = readStringValue(input.models.arkImage?.apiKey, input.models.arkApiKey);
+    if (arkApiKey) config.arkApiKey = arkApiKey;
+  }
+  const customModels = normalizeCustomModelsFromConfig(input);
+  Object.assign(config, resourceCustomModelFields(customModels));
+  return config;
+}
+
+function customModelStatusLabel(verified) {
+  if (verified === 'testing') return '测试中';
+  if (verified === 'pass') return '已验证';
+  if (verified === 'unpass') return '测试失败';
+  return '未测试';
+}
+
+function customModelValuesFromCard(card) {
+  const type = normalizeCustomModelType(card.querySelector('[data-custom-model-field="type"]').value);
+  const model = {
+    id: card.querySelector('[data-custom-model-field="id"]')?.value || '',
+    name: card.querySelector('[data-custom-model-field="name"]').value,
+    type,
+    model: card.querySelector('[data-custom-model-field="model"]').value,
+    endpoint: card.querySelector('[data-custom-model-field="endpoint"]').value,
+    apiKey: card.querySelector('[data-custom-model-field="apiKey"]').value,
+  };
+  if (type === 'IMAGE') {
+    model.imageRatios = [...card.querySelectorAll('[data-custom-model-field="imageRatios"]:checked')]
+      .map(input => input.value);
+    model.imageResolutions = [...card.querySelectorAll('[data-custom-model-field="imageResolutions"]:checked')]
+      .map(input => input.value);
+  }
+  const verified = card.dataset.verified;
+  if (verified === 'pass' || verified === 'unpass') model.verified = verified;
+  return model;
+}
+
+function getCustomModelConfigsFromDom() {
+  return [...$('#custom-model-list').querySelectorAll('.custom-model-card')]
+    .map(customModelValuesFromCard);
+}
+
+function renderCustomModelCards(models = []) {
+  const list = $('#custom-model-list');
+  const empty = $('#custom-model-empty');
+  if (!list || !empty) return;
+  empty.classList.toggle('hidden', models.length > 0);
+  list.innerHTML = models.map((model, index) => {
+    const type = normalizeCustomModelType(model.type);
+    const normalized = {
+      ...defaultCustomModel(type, index),
+      ...model,
+      ...(type === 'IMAGE'
+        ? {
+          imageRatios: model.imageRatios?.length ? model.imageRatios : [...defaultCustomImageRatios],
+          imageResolutions: model.imageResolutions?.length ? model.imageResolutions : [...defaultCustomImageResolutions],
+        }
+        : {}),
+    };
+    const title = normalized.name || `自定义模型 ${index + 1}`;
+    const status = normalized.verified || 'untested';
+    const ratios = uniqueKnownValues(normalized.imageRatios, customImageRatios);
+    const resolutions = uniqueKnownValues(normalized.imageResolutions, customImageResolutions);
+    return `<article class="custom-model-card" data-custom-model-index="${index}" data-verified="${escapeHtml(status)}">
+      <input data-custom-model-field="id" type="hidden" value="${escapeHtml(normalized.id || '')}">
+      <div class="custom-model-card-header">
+        <div class="custom-model-title"><strong>${escapeHtml(title)}</strong><span class="custom-model-status" data-status="${escapeHtml(status)}"><span></span>${escapeHtml(customModelStatusLabel(status))}</span></div>
+        <div class="inline-actions"><button class="small-button" data-custom-model-action="test" type="button">测试连通性</button><button class="small-button danger" data-custom-model-action="delete" type="button">删除</button></div>
+      </div>
+      <div class="form-grid two-columns">
+        <label><span><span class="required-mark">*</span> 模型名称（modelName）</span><input data-custom-model-field="name" maxlength="128" value="${escapeHtml(normalized.name)}" placeholder="例如：gpt-image-2"></label>
+        <label><span><span class="required-mark">*</span> 模型类型</span><select data-custom-model-field="type">${Object.entries(customModelTypes).map(([value, label]) => `<option value="${value}" ${type === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+        <label><span><span class="required-mark">*</span> 模型 ID（model）</span><input data-custom-model-field="model" maxlength="128" value="${escapeHtml(normalized.model)}" placeholder="例如：gpt-image-2"></label>
+        <label class="custom-endpoint-field ${type === 'ELEVENLABS' ? 'hidden' : ''}"><span><span class="required-mark">*</span> 自定义渠道 Base URL</span><input data-custom-model-field="endpoint" maxlength="512" value="${escapeHtml(normalized.endpoint)}" placeholder="未知"></label>
+        <label class="span-two"><span><span class="required-mark">*</span> 自定义渠道 API Key</span><span class="secret-input"><input data-custom-model-field="apiKey" type="password" autocomplete="off" value="${escapeHtml(normalized.apiKey)}"><button class="secret-toggle" data-custom-model-action="toggle-secret" type="button">查看</button></span></label>
+      </div>
+      <div class="custom-image-options ${type === 'IMAGE' ? '' : 'hidden'}">
+        <div class="custom-option-group"><span class="custom-option-label"><span class="required-mark">*</span> 图片比例</span><div class="choice-chips">${customImageRatios.map(ratio => `<label class="choice-chip"><input data-custom-model-field="imageRatios" type="checkbox" value="${ratio}" ${ratios.includes(ratio) ? 'checked' : ''}><span>${ratio}</span></label>`).join('')}</div><p class="muted">主要用于限制应用单次任务自定义模型的图片比例选择范围。</p></div>
+        <div class="custom-option-group"><span class="custom-option-label"><span class="required-mark">*</span> 图片清晰度</span><div class="choice-chips">${customImageResolutions.map(resolution => `<label class="choice-chip"><input data-custom-model-field="imageResolutions" type="checkbox" value="${resolution}" ${resolutions.includes(resolution) ? 'checked' : ''}><span>${resolution}</span></label>`).join('')}</div><p class="muted">主要用于限制应用单次任务自定义模型的图片清晰度选择范围。</p></div>
+      </div>
+    </article>`;
+  }).join('');
+}
+
+function setCustomModelCardVerified(card, status) {
+  card.dataset.verified = status;
+  const statusNode = card.querySelector('.custom-model-status');
+  if (!statusNode) return;
+  statusNode.dataset.status = status;
+  statusNode.innerHTML = `<span></span>${escapeHtml(customModelStatusLabel(status))}`;
+}
+
+function updateCustomModelTitle(card) {
+  const title = card.querySelector('.custom-model-title strong');
+  const name = card.querySelector('[data-custom-model-field="name"]').value.trim();
+  title.textContent = name || `自定义模型 ${Number(card.dataset.customModelIndex || 0) + 1}`;
+}
+
+function validateCustomModels(models) {
+  const nameCounts = new Map();
+  models.forEach(model => {
+    const key = model.name.trim().toLowerCase();
+    if (key) nameCounts.set(key, (nameCounts.get(key) || 0) + 1);
+  });
+  models.forEach((model, index) => {
+    const position = `第 ${index + 1} 个自定义模型`;
+    if (!model.name.trim()) throw new Error(`${position}缺少模型名称（modelName）`);
+    if ((nameCounts.get(model.name.trim().toLowerCase()) || 0) > 1) throw new Error(`${position}模型名称重复`);
+    if (!model.model.trim()) throw new Error(`${position}缺少模型 ID（model）`);
+    if (model.type !== 'ELEVENLABS' && !model.endpoint.trim()) throw new Error(`${position}缺少自定义渠道 Base URL`);
+    if (!model.apiKey.trim()) throw new Error(`${position}缺少 API Key`);
+    if (model.type === 'IMAGE' && (!model.imageRatios || model.imageRatios.length === 0)) throw new Error(`${position}请至少选择一个图片比例`);
+    if (model.type === 'IMAGE' && (!model.imageResolutions || model.imageResolutions.length === 0)) throw new Error(`${position}请至少选择一个图片清晰度`);
+  });
+}
+
+function collectCustomModelFieldsFromForm() {
+  const models = getCustomModelConfigsFromDom().map((model, index) => ({
+    ...defaultCustomModel(model.type, index),
+    ...model,
+    name: model.name.trim(),
+    model: model.model.trim(),
+    endpoint: model.endpoint.trim(),
+    apiKey: model.apiKey.trim(),
+  })).filter(model => model.name || model.model || model.endpoint || model.apiKey);
+  validateCustomModels(models);
+  return resourceCustomModelFields(models);
+}
+
+function draftResourceConfigFromManualForm(form) {
+  let config = {};
+  const resourceJson = form.elements.resourceJson.value.trim();
+  if (resourceJson) {
+    try {
+      config = normalizeImportedResourceConfig(JSON.parse(resourceJson));
+    } catch {
+      config = {};
+    }
+  }
+  for (const name of manualResourceFieldNames) {
+    const value = form.elements[name].value.trim();
+    if (value) config[name] = value;
+  }
+  const models = getCustomModelConfigsFromDom()
+    .map((model, index) => ({
+      ...defaultCustomModel(model.type, index),
+      ...model,
+      name: model.name.trim(),
+      model: model.model.trim(),
+      endpoint: model.endpoint.trim(),
+      apiKey: model.apiKey.trim(),
+    }))
+    .filter(model => model.name || model.model || model.endpoint || model.apiKey);
+  Object.assign(config, resourceCustomModelFields(models));
+  return config;
+}
+
+async function testCustomModelConnection(card) {
+  const button = card.querySelector('[data-custom-model-action="test"]');
+  try {
+    button.disabled = true;
+    button.textContent = '测试中…';
+    setCustomModelCardVerified(card, 'testing');
+    const model = customModelValuesFromCard(card);
+    const payload = {
+      ...defaultCustomModel(model.type, Number(card.dataset.customModelIndex || 0)),
+      ...model,
+      name: model.name.trim(),
+      model: model.model.trim(),
+      endpoint: model.endpoint.trim(),
+      apiKey: model.apiKey.trim(),
+    };
+    validateCustomModels([payload]);
+    await api('/api/admin/custom-models/test', {
+      method: 'POST',
+      body: JSON.stringify({
+        accountId: state.actor.accountId,
+        type: payload.type,
+        model: payload.model,
+        endpoint: payload.endpoint,
+        apiKey: payload.apiKey,
+        imageResolutions: payload.imageResolutions || [],
+      }),
+    });
+    setCustomModelCardVerified(card, 'pass');
+    toast('自定义模型连通性验证通过。');
+  } catch (error) {
+    setCustomModelCardVerified(card, 'unpass');
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = '测试连通性';
+  }
+}
+
+
+async function enterStudio(connectionId, configGroup) {
+  setText('#project-message', '正在创建一次性登录凭证并打开 Studio…');
+  const result = await api('/api/studio/tickets/launch', {
+    method: 'POST',
+    body: JSON.stringify(configGroup ? { connectionId, configGroup } : {}),
+  });
+  window.open(result.launchUrl, '_blank', 'noopener,noreferrer');
+  setText('#project-message', 'Studio 已在新窗口打开。');
 }
 
 async function routeActor(actor) {
   state.actor = actor;
   if (actor.role === 'SUBACCOUNT') {
-    await enterStudio();
+    await showProjectChooser(actor);
     return;
   }
   showAdmin(actor);
   await loadAdminData();
+}
+
+async function showProjectChooser(actor) {
+  $('#login-view').classList.add('hidden');
+  $('#admin-view').classList.add('hidden');
+  $('#project-view').classList.remove('hidden');
+  setText('#project-user', `${actor.displayName || actor.loginName}，请选择要进入的 Project。`);
+  setText('#project-message', '正在读取可访问 Project…');
+  try {
+    const result = await api('/api/auth/my-projects');
+    state.loginProjects = result.items || [];
+    $('#project-list').innerHTML = state.loginProjects.length
+      ? state.loginProjects.map(item => `<button class="connection-add-card project-entry" data-project-connection="${escapeHtml(item.connectionId)}" data-project-group="${escapeHtml(item.name)}" type="button">
+          <strong>${escapeHtml(item.projectId || item.name)}</strong>
+          <span>${escapeHtml(item.connectionName || item.connectionId)}${item.isDefault ? ' · 默认' : ''}</span>
+        </button>`).join('')
+      : '<div class="empty">暂无可访问 Project，请联系管理员授权。</div>';
+    setText('#project-message', '');
+  } catch (error) {
+    setText('#project-message', error.message);
+    $('#project-message').classList.add('error');
+  }
 }
 
 function showAdmin(actor) {
@@ -311,8 +733,18 @@ async function loadConfigGroups() {
   setText('#stat-groups-note', `${state.groups.filter(group => ['AVAILABLE', 'PARTIAL_FAILED'].includes(group.status)).length} 个可分配`);
   refreshGroupSelect();
   refreshPriceScopeFilter();
-  $('#model-config-group').innerHTML = '<option value="">全部</option>' + state.groups
-    .map(group => `<option value="${escapeHtml(group.configGroupId)}">${escapeHtml(group.projectId)}</option>`).join('');
+  renderModelConfigGroupOptions();
+}
+
+function renderModelConfigGroupOptions() {
+  const select = $('#model-config-group');
+  if (!select) return;
+  const current = select.value;
+  const groups = state.groups.filter(group => group.status !== 'DELETED');
+  select.innerHTML = '<option value="">全部</option>' + groups
+    .map(group => `<option value="${escapeHtml(group.configGroupId)}">${escapeHtml(group.projectId || group.name || group.configGroupId)}</option>`)
+    .join('');
+  select.value = groups.some(group => group.configGroupId === current) ? current : '';
 }
 
 function renderConfigGroups() {
@@ -344,6 +776,7 @@ function renderConfigGroups() {
       <div class="config-meta">
         <div><span>配置状态</span><strong>${group.currentVersion > 0 ? '已生效' : '待生效'}</strong></div>
         <div><span>Studio 连接</span><strong>${escapeHtml(group.connectionName || group.appId || '未配置')}</strong></div>
+        <div><span>资源配置来源</span><strong>${group.resourceConfigSource === 'STUDIO' ? 'Studio 远端' : '本地缓存'}</strong></div>
         <div><span>区域</span><strong>${escapeHtml(config.region || config.tosRegion || '未配置')}</strong></div>
         <div><span>资源凭证</span><strong>${secretCount > 0 ? `已配置 ${secretCount} 项` : '未配置'}</strong></div>
         <div><span>${escapeHtml(group.billingPeriod || currentPeriod())} 月度共享上限</span><strong>${escapeHtml(limit)}</strong></div>
@@ -352,6 +785,7 @@ function renderConfigGroups() {
         <div><span>当前可用额度</span><strong>${escapeHtml(available)}</strong></div>
         <div><span>数据共享</span><strong>${group.projectLevelSharing ? '已开启' : '未开启'}</strong></div>
       </div>
+      ${group.resourceConfigSyncError ? `<div class="sync-notices"><div><strong>当前展示本地缓存</strong><span>${escapeHtml(group.resourceConfigSyncError)}</span></div></div>` : ''}
       ${group.failedUsers?.length ? `<div class="sync-errors">${group.failedUsers.map(user => `<div><strong>${escapeHtml(user.loginName)}</strong><span>${escapeHtml(user.errorCode || 'PROFILE_SYNC_FAILED')} · ${escapeHtml(user.errorMessage || '同步失败')}${user.requestId ? ` · Request ID: ${escapeHtml(user.requestId)}` : ''}</span></div>`).join('')}</div>` : ''}
     </article>`;
   }).join('');
@@ -359,6 +793,7 @@ function renderConfigGroups() {
 
 function refreshGroupSelect() {
   const select = $('#user-config-group');
+  if (!select) return;
   const available = state.groups.filter(group => ['AVAILABLE', 'PARTIAL_FAILED'].includes(group.status));
   select.innerHTML = available.length
     ? available.map(group => `<option value="${escapeHtml(group.configGroupId)}" ${group.isDefault ? 'selected' : ''}>${escapeHtml(group.projectId)}${group.isDefault ? '（默认）' : ''}</option>`).join('')
@@ -393,33 +828,41 @@ function refreshPriceScopeFilter() {
     : defaultGroup?.configGroupId || '*';
 }
 
-function selectedGroup() {
-  const configGroupId = $('#user-config-group').value;
-  return state.groups.find(group => group.configGroupId === configGroupId);
+function renderUserBindingCards(bindings = []) {
+  const list = $('#user-binding-list');
+  const available = state.groups.filter(group => ['AVAILABLE', 'PARTIAL_FAILED'].includes(group.status));
+  const initial = bindings.length ? bindings : [{
+    configGroupId: available.find(group => group.isDefault)?.configGroupId || available[0]?.configGroupId || '',
+    monthlyLimit: '',
+    isDefault: true,
+  }];
+  list.innerHTML = initial.map((binding, index) => bindingCardHtml(binding, index)).join('');
 }
 
-function updateUserLimitHelp() {
-  const group = selectedGroup();
-  if (!group) {
-    setText('#user-limit-help', '仍受所选配置组的月度共享上限约束。');
-    return;
-  }
-  const groupLimit = group.monthlyLimit
-    ? `${formatMoney(group.monthlyLimit)} CNY`
-    : '不限额';
-  const groupAvailable = group.quota?.availableAmount === null || group.quota?.availableAmount === undefined
-    ? '不限额'
-    : `${formatMoney(group.quota.availableAmount)} CNY`;
-  setText(
-    '#user-limit-help',
-    `个人上限留空时仍受配置组约束；${group.billingPeriod || currentPeriod()} 配置组上限 ${groupLimit}，当前可用 ${groupAvailable}。`,
-  );
+function bindingCardHtml(binding, index) {
+  const available = state.groups.filter(group => ['AVAILABLE', 'PARTIAL_FAILED'].includes(group.status));
+  return `<div class="binding-card" data-binding-card>
+    <label>配置组<select data-binding-group required>${available.map(group =>
+      `<option value="${escapeHtml(group.configGroupId)}" ${group.configGroupId === binding.configGroupId ? 'selected' : ''}>${escapeHtml(group.projectId)}</option>`).join('')}</select></label>
+    <label>子账号月度上限<input data-binding-limit inputmode="decimal" placeholder="不限额" value="${escapeHtml(binding.monthlyLimit || '')}"></label>
+    <label class="checkbox-row binding-default"><input data-binding-default name="bindingDefault" type="radio" ${binding.isDefault || index === 0 ? 'checked' : ''}><span>默认</span></label>
+    <button class="small-button danger" data-binding-remove type="button">删除</button>
+  </div>`;
+}
+
+function collectUserBindings() {
+  return $$('[data-binding-card]').map(card => ({
+    configGroupId: card.querySelector('[data-binding-group]').value,
+    monthlyLimit: card.querySelector('[data-binding-limit]').value.trim() || null,
+    isDefault: card.querySelector('[data-binding-default]').checked,
+  })).filter(binding => binding.configGroupId);
 }
 
 function openConfigDialog(group = null) {
   const form = $('#config-form');
   form.reset();
   setConfigMode('manual');
+  renderCustomModelCards([]);
   setFormMessage(form, '');
   $('#config-group-id').value = group?.configGroupId || '';
   setText('#config-dialog-title', group ? `编辑 · ${group.projectId}` : '新建配置组');
@@ -437,15 +880,11 @@ function openConfigDialog(group = null) {
       if (form.elements[name] && config[name]) form.elements[name].value = config[name];
     });
     form.elements.resourceJson.value = JSON.stringify(
-      Object.fromEntries(resourceFieldNames.filter(name => config[name] !== undefined).map(name => [name, config[name]])),
+      studioSettingsJsonFromResourceConfig(config),
       null,
       2,
     );
-    form.elements.customModelJson.value = JSON.stringify(
-      Object.fromEntries(customModelFieldNames.filter(name => config[name] !== undefined).map(name => [name, config[name]])),
-      null,
-      2,
-    );
+    renderCustomModelCards(normalizeCustomModelsFromConfig(config));
   }
   if (!group) {
     form.elements.connectionId.value = state.connection?.connectionId || '';
@@ -456,10 +895,30 @@ function openConfigDialog(group = null) {
 
 function setConfigMode(mode) {
   const form = $('#config-form');
+  if (mode === 'json' && form.dataset.mode !== 'json') {
+    form.elements.resourceJson.value = JSON.stringify(
+      studioSettingsJsonFromResourceConfig(draftResourceConfigFromManualForm(form)),
+      null,
+      2,
+    );
+  }
+  if (mode === 'manual' && form.dataset.mode === 'json' && form.elements.resourceJson.value.trim()) {
+    try {
+      const config = normalizeImportedResourceConfig(JSON.parse(form.elements.resourceJson.value.trim()));
+      manualResourceFieldNames.forEach(name => {
+        if (form.elements[name]) form.elements[name].value = config[name] || '';
+      });
+      renderCustomModelCards(normalizeCustomModelsFromConfig(config));
+      setFormMessage(form, '');
+    } catch (error) {
+      setFormMessage(form, error.message, true);
+    }
+  }
   form.dataset.mode = mode;
   $$('.config-mode-tab').forEach(button => button.classList.toggle('active', button.dataset.configMode === mode));
   $('#config-manual-panel').classList.toggle('hidden', mode !== 'manual');
   $('#config-json-panel').classList.toggle('hidden', mode !== 'json');
+  $('#custom-model-panel').classList.toggle('hidden', mode === 'json');
 }
 
 function resourceConfigFromForm(form) {
@@ -467,29 +926,13 @@ function resourceConfigFromForm(form) {
   if (form.dataset.mode === 'json') {
     const resourceJson = form.elements.resourceJson.value.trim();
     if (!resourceJson) throw new Error('请填写资源 JSON');
-    const parsed = JSON.parse(resourceJson);
-    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('资源 JSON 必须是对象');
-    for (const name of resourceFieldNames) {
-      const value = typeof parsed[name] === 'string' ? parsed[name].trim() : parsed[name];
-      if (value !== undefined && value !== null && value !== '') config[name] = value;
-    }
+    config = normalizeImportedResourceConfig(JSON.parse(resourceJson));
   } else {
     for (const name of manualResourceFieldNames) {
       const value = form.elements[name].value.trim();
       if (value) config[name] = value;
     }
-  }
-  const customJson = form.elements.customModelJson.value.trim();
-  if (customJson) {
-    const parsed = JSON.parse(customJson);
-    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
-      throw new Error('自定义模型 JSON 必须是对象');
-    }
-    const unexpected = Object.keys(parsed).filter(name => !customModelFieldNames.includes(name));
-    if (unexpected.length > 0) throw new Error(`自定义模型 JSON 包含不支持字段：${unexpected.join('、')}`);
-    for (const name of customModelFieldNames) {
-      if (parsed[name] !== undefined) config[name] = parsed[name];
-    }
+    Object.assign(config, collectCustomModelFieldsFromForm());
   }
   return config;
 }
@@ -590,13 +1033,20 @@ function renderUsers() {
       || quota.effectiveAvailableAmount === undefined
       ? '不限额'
       : `${formatMoney(quota.effectiveAvailableAmount)} CNY`;
+    const bindings = user.bindings || [];
+    const bindingColumn = (render, fallback) => bindings.length
+      ? `<div class="cell-title">${bindings.map(render).join('')}</div>`
+      : fallback;
     return `<tr>
     <td><div class="cell-title"><strong>${escapeHtml(user.loginName)}</strong>${user.password ? `<div class="user-password"><span class="secret-value" data-password-value>••••••••</span><button class="small-button link-button" data-user-action="toggle-password" data-user-id="${escapeHtml(user.userId)}" type="button">查看密码</button></div>` : '<span>历史账号需修改密码</span>'}</div></td>
-    <td>${escapeHtml(user.configGroupName || '未分配')}</td>
-    <td>${escapeHtml(personalLimit)}</td>
-    <td>${escapeHtml(formatMoney(quota.actualAmount || 0))} CNY</td>
-    <td>${escapeHtml(formatMoney(quota.reservedAmount || 0))} CNY</td>
-    <td>${escapeHtml(effectiveAvailable)}</td>
+    <td>${bindingColumn(binding => `<span>${escapeHtml(binding.configGroupName)}${binding.isDefault ? '（默认）' : ''}</span>`, escapeHtml(user.configGroupName || '未分配'))}</td>
+    <td>${bindingColumn(binding => `<span>${binding.monthlyLimit ? `${escapeHtml(formatMoney(binding.monthlyLimit))} CNY` : '不设个人上限'}</span>`, escapeHtml(personalLimit))}</td>
+    <td>${bindingColumn(binding => `<span>${escapeHtml(formatMoney(binding.quota?.actualAmount || 0))} CNY</span>`, `${escapeHtml(formatMoney(quota.actualAmount || 0))} CNY`)}</td>
+    <td>${bindingColumn(binding => `<span>${escapeHtml(formatMoney(binding.quota?.reservedAmount || 0))} CNY</span>`, `${escapeHtml(formatMoney(quota.reservedAmount || 0))} CNY`)}</td>
+    <td>${bindingColumn(binding => {
+      const available = binding.quota?.effectiveAvailableAmount;
+      return `<span>${available === null || available === undefined ? '不限额' : `${escapeHtml(formatMoney(available))} CNY`}</span>`;
+    }, escapeHtml(effectiveAvailable))}</td>
     <td><div class="cell-title user-status">${badge(user.status)}${user.profileSyncErrorMessage ? `<span>${escapeHtml(user.profileSyncErrorCode || 'PROFILE_SYNC_FAILED')} · ${escapeHtml(user.profileSyncErrorMessage)}${user.profileSyncRequestId ? ` · Request ID: ${escapeHtml(user.profileSyncRequestId)}` : ''}</span>` : ''}</div></td>
     <td class="user-menu-cell"><button class="user-menu-trigger" data-user-menu="${escapeHtml(user.userId)}" type="button" aria-label="账号操作" aria-haspopup="menu">⋯</button></td>
   </tr>`;
@@ -636,7 +1086,7 @@ function openUserDialog(user = null) {
   $('#toggle-user-password').textContent = '查看';
   $('#toggle-user-password').setAttribute('aria-label', '显示密码');
   setFormMessage(form, '');
-  refreshGroupSelect();
+  refreshPriceScopeSelect();
   $('#user-id').value = user?.userId || '';
   setText('#user-dialog-title', user ? `编辑 · ${user.displayName || user.loginName || ''}`.trim() : '新建子账号');
   setText('#user-submit', user ? '保存' : '创建账号');
@@ -648,10 +1098,12 @@ function openUserDialog(user = null) {
     form.elements.displayName.value = user.displayName || '';
     form.elements.loginName.value = user.loginName || '';
     form.elements.password.value = user.password || '';
-    form.elements.configGroupId.value = user.configGroupId || '';
-    form.elements.monthlyLimit.value = user.monthlyLimit || '';
   }
-  updateUserLimitHelp();
+  renderUserBindingCards((user?.bindings || []).map(binding => ({
+    configGroupId: binding.configGroupId,
+    monthlyLimit: binding.monthlyLimit || '',
+    isDefault: binding.isDefault,
+  })));
   $('#user-dialog').showModal();
 }
 
@@ -664,8 +1116,7 @@ async function submitUser(event) {
     const payload = {
         accountId: state.actor.accountId,
         displayName: form.elements.displayName.value.trim(),
-        configGroupId: form.elements.configGroupId.value,
-        monthlyLimit: form.elements.monthlyLimit.value.trim() || null,
+        configGroupBindings: collectUserBindings(),
     };
     if (form.elements.password.value && form.elements.password.value !== form.dataset.originalPassword) {
       payload.password = form.elements.password.value;
@@ -735,9 +1186,9 @@ async function loadPrices() {
   $('#price-list').innerHTML = items.map(item => `<tr>
     <td><div class="cell-title"><strong class="billing-item-full">${escapeHtml(item.billingItemId)}</strong>${item.custom ? '<span>自定义计费项</span>' : ''}</div></td>
     <td>${escapeHtml(item.unit)}</td>
-    <td>${escapeHtml(formatMoney(item.customerUnitPrice))}</td>
-    <td>${escapeHtml(formatMoney(item.costUnitPrice))}</td>
-    <td>${item.configured ? badge(item.enabled ? 'ACTIVE' : 'DISABLED') : '<span class="badge neutral">待配置</span>'}</td>
+    <td>${escapeHtml(formatPrice(item.customerUnitPrice))}</td>
+    <td>${escapeHtml(formatPrice(item.costUnitPrice))}</td>
+    <td>${item.configured ? badge(item.enabled ? 'ACTIVE' : 'DISABLED') : item.inherited ? '<span class="badge neutral">继承平台兜底</span>' : item.builtinDefault ? '<span class="badge neutral">内置兜底</span>' : '<span class="badge neutral">待配置</span>'}</td>
     <td><div class="inline-actions"><button class="small-button" data-price-action="edit" data-price-scope-type="${escapeHtml(item.scopeType || '')}" data-price-scope-id="${escapeHtml(item.scopeId || '')}" data-price-item-id="${escapeHtml(item.billingItemId)}" data-price-unit="${escapeHtml(item.unit)}" type="button">${item.configured ? '编辑' : '配置'}</button>${item.enabled ? `<button class="small-button danger" data-price-action="delete" data-price-scope-type="${escapeHtml(item.scopeType)}" data-price-scope-id="${escapeHtml(item.scopeId)}" data-price-item-id="${escapeHtml(item.billingItemId)}" data-price-unit="${escapeHtml(item.unit)}" type="button">删除</button>` : ''}</div></td>
   </tr>`).join('');
 }
@@ -778,13 +1229,13 @@ function openPriceDialog(item = null) {
   if (item) {
     form.elements.billingItemId.value = item.billingItemId;
     form.elements.unit.value = item.unit;
-    form.elements.customerUnitPrice.value = Number(item.customerUnitPrice || 0).toFixed(2);
-    form.elements.costUnitPrice.value = Number(item.costUnitPrice || 0).toFixed(2);
+    form.elements.customerUnitPrice.value = formatPrice(item.customerUnitPrice);
+    form.elements.costUnitPrice.value = formatPrice(item.costUnitPrice);
   } else {
     form.elements.billingItemId.value = '';
     form.elements.unit.value = '';
-    form.elements.customerUnitPrice.value = '0.00';
-    form.elements.costUnitPrice.value = '0.00';
+    form.elements.customerUnitPrice.value = '1';
+    form.elements.costUnitPrice.value = '0.5';
   }
   $('#price-dialog').showModal();
 }
@@ -816,7 +1267,13 @@ async function submitPrice(event) {
 }
 
 async function downloadCsvTemplate(kind) {
-  const response = await fetch(`/api/admin/${kind}/import-template?accountId=${encodeURIComponent(state.actor.accountId)}`, {
+  const params = new URLSearchParams({ accountId: state.actor.accountId });
+  if (kind === 'prices') {
+    const scopeId = $('#price-scope-filter').value || '*';
+    params.set('scopeId', scopeId);
+    params.set('scopeType', scopeId === '*' ? 'PLATFORM' : 'CONFIG_GROUP');
+  }
+  const response = await fetch(`/api/admin/${kind}/import-template?${params}`, {
     credentials: 'same-origin',
   });
   if (!response.ok) {
@@ -835,9 +1292,15 @@ async function importCsv(kind, file) {
   const label = kind === 'subaccounts' ? '子账号' : '价格';
   try {
     toast(`正在导入${label} CSV…`);
+    const payload = { accountId: state.actor.accountId, csv: await file.text() };
+    if (kind === 'prices') {
+      const scopeId = $('#price-scope-filter').value || '*';
+      payload.scopeId = scopeId;
+      payload.scopeType = scopeId === '*' ? 'PLATFORM' : 'CONFIG_GROUP';
+    }
     const result = await api(`/api/admin/${kind}/import`, {
       method: 'POST',
-      body: JSON.stringify({ accountId: state.actor.accountId, csv: await file.text() }),
+      body: JSON.stringify(payload),
     });
     setText('#import-dialog-title', `${label}导入结果`);
     setText('#import-summary', `共 ${result.total} 行，成功 ${result.succeeded} 行，失败 ${result.failed} 行。`);
@@ -892,28 +1355,60 @@ async function loadModelCatalog() {
 function formatUsageByUnit(items) {
   return items.length > 0
     ? `<span class="usage-grid">${items.map(item =>
-      `<span><strong>${escapeHtml(formatQuantity(item.usageValue, item.unit))}</strong><small>${escapeHtml(item.unit)}</small></span>`).join('')}</span>`
+      `<span title="${escapeHtml(usageTitle(item.usageValue, item.unit))}"><strong>${escapeHtml(formatQuantity(item.usageValue, item.unit))}</strong><small>${escapeHtml(item.unit === 'token' ? 'Token 总量' : item.unit)}</small></span>`).join('')}</span>`
     : '0';
 }
 
 function formatQuantity(value, unit) {
   const parsed = Number(value || 0);
   if (!Number.isFinite(parsed)) return unit === 'token' ? '0' : '0.00';
+  if (unit === 'token') return formatCompactCount(parsed);
   return parsed.toLocaleString('zh-CN', {
-    minimumFractionDigits: unit === 'token' ? 0 : 2,
-    maximumFractionDigits: unit === 'token' ? 0 : 6,
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 6,
   });
+}
+
+function formatExactCount(value) {
+  const parsed = Number(value || 0);
+  return Number.isFinite(parsed) ? Math.round(parsed).toLocaleString('zh-CN') : '0';
+}
+
+function formatCompactCount(value) {
+  const parsed = Number(value || 0);
+  if (!Number.isFinite(parsed)) return '0';
+  const abs = Math.abs(parsed);
+  const units = [
+    { threshold: 1_000_000_000, suffix: 'B' },
+    { threshold: 1_000_000, suffix: 'M' },
+    { threshold: 10_000, suffix: 'K' },
+  ];
+  const unit = units.find(item => abs >= item.threshold);
+  if (!unit) return Math.round(parsed).toLocaleString('zh-CN');
+  const valueInUnit = parsed / unit.threshold;
+  const digits = Math.abs(valueInUnit) >= 100 ? 0 : Math.abs(valueInUnit) >= 10 ? 1 : 2;
+  return `${valueInUnit.toFixed(digits).replace(/\.0+$/, '').replace(/(\.\d*[1-9])0+$/, '$1')}${unit.suffix}`;
+}
+
+function usageTitle(value, unit) {
+  return unit === 'token'
+    ? `${formatExactCount(value)} token`
+    : `${formatQuantity(value, unit)} ${unit}`;
 }
 
 function tokenUsageDetails(tokenUsage) {
   if (!tokenUsage) return '';
-  const input = formatQuantity(tokenUsage.inputTokens ?? 0, 'token');
-  const output = formatQuantity(tokenUsage.outputTokens ?? 0, 'token');
-  const cached = formatQuantity(tokenUsage.cachedTokens ?? 0, 'token');
-  const label = `Input ${input} / Output ${output} / Cached ${cached}`;
+  const inputRaw = tokenUsage.inputTokens ?? 0;
+  const outputRaw = tokenUsage.outputTokens ?? 0;
+  const cachedRaw = tokenUsage.cachedTokens ?? 0;
+  const input = formatCompactCount(inputRaw);
+  const output = formatCompactCount(outputRaw);
+  const cached = formatCompactCount(cachedRaw);
+  const label = `Input: ${formatExactCount(inputRaw)} token；Output: ${formatExactCount(outputRaw)} token；Cache: ${formatExactCount(cachedRaw)} token`;
   return `<div class="token-usage" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">
-    <div class="token-usage-primary"><span>${escapeHtml(input)}</span><span class="token-separator">/</span><span>${escapeHtml(output)}</span></div>
-    <div class="token-usage-cached"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11a3 3 0 0 1 3 3v14a3 3 0 0 0-3-3H6.5A2.5 2.5 0 0 0 4 19.5z"></path><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v17a3 3 0 0 1 3-3h1.5a2.5 2.5 0 0 1 2.5 2.5z"></path></svg><span>${escapeHtml(cached)}</span></div>
+    <span><em>Input</em><strong>${escapeHtml(input)}</strong></span>
+    <span><em>Output</em><strong>${escapeHtml(output)}</strong></span>
+    <span><em>Cache</em><strong>${escapeHtml(cached)}</strong></span>
   </div>`;
 }
 
@@ -974,9 +1469,15 @@ function switchSection(section) {
   if (section === 'configs') loadConfigGroups().catch(error => toast(error.message, true));
   if (section === 'users') loadUsers().catch(error => toast(error.message, true));
   if (section === 'prices') loadPrices().catch(error => toast(error.message, true));
-  if (section === 'models') loadModelCatalog()
-    .then(() => loadModelUsage())
-    .catch(error => toast(error.message, true));
+  if (section === 'models') {
+    const ensureGroups = state.groups.length === 0
+      ? loadConfigGroups()
+      : Promise.resolve().then(renderModelConfigGroupOptions);
+    ensureGroups
+      .then(() => loadModelCatalog())
+      .then(() => loadModelUsage())
+      .catch(error => toast(error.message, true));
+  }
   if (section === 'bills') loadBills().catch(error => toast(error.message, true));
 }
 
@@ -987,9 +1488,10 @@ $('#login-form').addEventListener('submit', async event => {
   try {
     message.textContent = '正在登录…';
     message.classList.remove('error');
+    const formData = Object.fromEntries(new FormData(form));
     const result = await api('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify(Object.fromEntries(new FormData(form))),
+      body: JSON.stringify(formData),
     });
     form.reset();
     await routeActor(result.user);
@@ -1002,6 +1504,18 @@ $('#login-form').addEventListener('submit', async event => {
 $('#logout').addEventListener('click', async () => {
   await api('/api/auth/logout', { method: 'POST', body: '{}' });
   window.location.reload();
+});
+$('#project-logout').addEventListener('click', async () => {
+  await api('/api/auth/logout', { method: 'POST', body: '{}' });
+  window.location.reload();
+});
+$('#project-list').addEventListener('click', event => {
+  const button = event.target.closest('[data-project-connection]');
+  if (!button) return;
+  enterStudio(button.dataset.projectConnection, button.dataset.projectGroup).catch(error => {
+    setText('#project-message', error.message);
+    $('#project-message').classList.add('error');
+  });
 });
 
 $$('.nav-item').forEach(button => button.addEventListener('click', () => switchSection(button.dataset.section)));
@@ -1036,6 +1550,46 @@ $('#model-search').addEventListener('click', () => loadModelUsage().catch(error 
 $('#model-prev').addEventListener('click', () => loadModelUsage(Math.max(1, state.modelPage - 1)).catch(error => toast(error.message, true)));
 $('#model-next').addEventListener('click', () => loadModelUsage(state.modelPage + 1).catch(error => toast(error.message, true)));
 $$('.config-mode-tab').forEach(button => button.addEventListener('click', () => setConfigMode(button.dataset.configMode)));
+$('#add-custom-model').addEventListener('click', () => {
+  const models = getCustomModelConfigsFromDom();
+  models.push(defaultCustomModel('LANGUAGE', models.length));
+  renderCustomModelCards(models);
+});
+$('#custom-model-list').addEventListener('input', event => {
+  const card = event.target.closest('.custom-model-card');
+  if (!card) return;
+  setCustomModelCardVerified(card, 'untested');
+  if (event.target.matches('[data-custom-model-field="name"]')) updateCustomModelTitle(card);
+  if (event.target.matches('[data-custom-model-field="type"]')) {
+    renderCustomModelCards(getCustomModelConfigsFromDom());
+  }
+});
+$('#custom-model-list').addEventListener('change', event => {
+  const card = event.target.closest('.custom-model-card');
+  if (!card) return;
+  setCustomModelCardVerified(card, 'untested');
+  if (event.target.matches('[data-custom-model-field="type"]')) {
+    renderCustomModelCards(getCustomModelConfigsFromDom());
+  }
+});
+$('#custom-model-list').addEventListener('click', event => {
+  const button = event.target.closest('[data-custom-model-action]');
+  if (!button) return;
+  const card = button.closest('.custom-model-card');
+  if (!card) return;
+  if (button.dataset.customModelAction === 'delete') {
+    const models = getCustomModelConfigsFromDom();
+    models.splice(Number(card.dataset.customModelIndex || 0), 1);
+    renderCustomModelCards(models);
+  }
+  if (button.dataset.customModelAction === 'toggle-secret') {
+    const input = card.querySelector('[data-custom-model-field="apiKey"]');
+    const visible = input.type === 'text';
+    input.type = visible ? 'password' : 'text';
+    button.textContent = visible ? '查看' : '隐藏';
+  }
+  if (button.dataset.customModelAction === 'test') testCustomModelConnection(card);
+});
 
 $('#config-list').addEventListener('click', event => {
   const button = event.target.closest('[data-config-action]');
@@ -1144,7 +1698,25 @@ $('#toggle-user-password').addEventListener('click', () => {
   $('#toggle-user-password').textContent = visible ? '查看' : '隐藏';
   $('#toggle-user-password').setAttribute('aria-label', visible ? '显示密码' : '隐藏密码');
 });
-$('#user-config-group').addEventListener('change', updateUserLimitHelp);
+$('#add-user-binding').addEventListener('click', () => {
+  const selectedIds = new Set(collectUserBindings().map(binding => binding.configGroupId));
+  const next = state.groups
+    .filter(group => ['AVAILABLE', 'PARTIAL_FAILED'].includes(group.status))
+    .find(group => !selectedIds.has(group.configGroupId));
+  const bindings = collectUserBindings();
+  bindings.push({ configGroupId: next?.configGroupId || '', monthlyLimit: null, isDefault: bindings.length === 0 });
+  renderUserBindingCards(bindings);
+});
+$('#user-binding-list').addEventListener('click', event => {
+  if (!event.target.closest('[data-binding-remove]')) return;
+  const bindings = collectUserBindings();
+  if (bindings.length <= 1) return;
+  event.target.closest('[data-binding-card]').remove();
+  const remaining = collectUserBindings();
+  if (!remaining.some(binding => binding.isDefault) && $('#user-binding-list [data-binding-default]')) {
+    $('#user-binding-list [data-binding-default]').checked = true;
+  }
+});
 
 $$('.close-dialog').forEach(button => button.addEventListener('click', () => button.closest('dialog').close()));
 $$('dialog').forEach(dialog => dialog.addEventListener('close', () => {
@@ -1154,5 +1726,5 @@ $$('dialog').forEach(dialog => dialog.addEventListener('close', () => {
 }));
 
 api('/api/auth/me')
-  .then(result => result.user.role === 'SUBACCOUNT' ? undefined : routeActor(result.user))
+  .then(result => routeActor(result.user))
   .catch(() => undefined);

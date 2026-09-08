@@ -15,10 +15,27 @@ export interface StudioDeploymentProfile {
   requiredResourceFields: string[];
 }
 
+export interface StudioResourceProfile {
+  lasBaseUrl?: string;
+  tosBucketName?: string;
+  tosUploadPrefix?: string;
+  tosRegion?: string;
+  tosEndpoint?: string;
+  outputTosPath?: string;
+  region?: string;
+  customModels?: unknown;
+}
+
 export interface StudioBillingCatalogItem {
   billingItemId: string;
   unit: string;
   operatorIds: string[];
+}
+
+export class StudioResourceProfileUnavailableError extends AppError {
+  constructor(readonly requestId: string) {
+    super('Studio 未开放远端资源配置读取接口，当前展示本地缓存', 200, 'STUDIO_RESOURCE_PROFILE_UNAVAILABLE');
+  }
 }
 
 interface StudioRequestContext {
@@ -239,6 +256,41 @@ export class StudioAdminClient {
       region: profile.region,
       tosRegion: profile.tosRegion,
       requiredResourceFields: profile.requiredResourceFields,
+    };
+  }
+
+  async getResourceProfile(
+    connection: StudioConnection,
+    input: {
+      appId: string;
+      projectId: string;
+    },
+  ): Promise<StudioResourceProfile> {
+    let response: Response;
+    try {
+      response = await this.post(connection, '/integration/api/v1/resource-profiles/get', {
+        appId: input.appId,
+        scopeType: 'PROJECT',
+        projectId: input.projectId,
+      }, { operation: 'get_resource_profile', appId: input.appId });
+    } catch (error) {
+      if (error instanceof StudioApiError && error.upstreamStatus === 404) {
+        throw new StudioResourceProfileUnavailableError(error.requestId);
+      }
+      throw error;
+    }
+    const payload = await response.json() as { data?: Record<string, unknown> | null };
+    const profile = payload.data;
+    if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return {};
+    return {
+      ...(typeof profile.lasBaseUrl === 'string' ? { lasBaseUrl: profile.lasBaseUrl } : {}),
+      ...(typeof profile.tosBucketName === 'string' ? { tosBucketName: profile.tosBucketName } : {}),
+      ...(typeof profile.tosUploadPrefix === 'string' ? { tosUploadPrefix: profile.tosUploadPrefix } : {}),
+      ...(typeof profile.tosRegion === 'string' ? { tosRegion: profile.tosRegion } : {}),
+      ...(typeof profile.tosEndpoint === 'string' ? { tosEndpoint: profile.tosEndpoint } : {}),
+      ...(typeof profile.outputTosPath === 'string' ? { outputTosPath: profile.outputTosPath } : {}),
+      ...(typeof profile.region === 'string' ? { region: profile.region } : {}),
+      ...(profile.customModels !== undefined ? { customModels: profile.customModels } : {}),
     };
   }
 
