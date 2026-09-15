@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { BillingService, type BaselineCallbackInput } from '../src/billing.js';
+import { baselineProjectId, BillingService, type BaselineCallbackInput } from '../src/billing.js';
 import type { Database, DatabaseExecutor } from '../src/db.js';
 import { AppError } from '../src/errors.js';
 import type { AppLogger } from '../src/logging.js';
@@ -70,5 +70,53 @@ describe('BillingService callback', () => {
       code: 'TASK_NOT_FOUND',
       statusCode: 404,
     } satisfies Partial<AppError>);
+  });
+});
+
+describe('baselineProjectId', () => {
+  it('prefers BillingContext extensions project id over the legacy top-level field', () => {
+    expect(baselineProjectId({
+      ProjectId: 'top-level-project',
+      Items: [{
+        BillingItemId: 'las_llm_seed-2.0-lite',
+        Unit: 'request',
+        Usage: 1,
+        BillingContext: JSON.stringify({
+          extensions: {
+            project_id: 'extension-project',
+          },
+        }),
+      }],
+    })).toBe('extension-project');
+  });
+
+  it('keeps legacy top-level ProjectId as a fallback', () => {
+    expect(baselineProjectId({
+      ProjectId: 'top-level-project',
+      Items: [{
+        BillingItemId: 'las_llm_seed-2.0-lite',
+        Unit: 'request',
+        Usage: 1,
+      }],
+    })).toBe('top-level-project');
+  });
+
+  it('rejects inconsistent project ids across item BillingContext extensions', () => {
+    expect(() => baselineProjectId({
+      Items: [
+        {
+          BillingItemId: 'las_llm_seed-2.0-lite',
+          Unit: 'request',
+          Usage: 1,
+          BillingContext: '{"extensions":{"project_id":"project-a"}}',
+        },
+        {
+          BillingItemId: 'las_llm_seed-2.0-pro',
+          Unit: 'request',
+          Usage: 1,
+          BillingContext: '{"extensions":{"project_id":"project-b"}}',
+        },
+      ],
+    })).toThrow('BillingContext.extensions.project_id 不一致');
   });
 });

@@ -4,6 +4,7 @@ import bcrypt from 'bcryptjs';
 import type { FastifyRequest } from 'fastify';
 import type { RowDataPacket } from 'mysql2/promise';
 
+import { message } from './i18n.js';
 import type { AppConfig } from './config.js';
 import type { Database, DatabaseExecutor } from './db.js';
 import { AppError } from './errors.js';
@@ -82,13 +83,13 @@ export class AuthService {
       const existing = existingUsers[0];
       if (Boolean(states[0]?.initialized) && !existing) {
         throw new AppError(
-          '数据库已初始化，但配置的管理员不存在；拒绝自动创建第二个系统管理员',
+          message('startup.adminMissing'),
           409,
           'BOOTSTRAP_ADMIN_MISMATCH',
         );
       }
       if (existing && existing.role !== 'SYSTEM_ADMIN') {
-        throw new AppError('配置的启动管理员角色不是 SYSTEM_ADMIN', 409, 'BOOTSTRAP_ADMIN_MISMATCH');
+        throw new AppError(message('startup.adminRoleMismatch'), 409, 'BOOTSTRAP_ADMIN_MISMATCH');
       }
 
       await tx.execute(
@@ -127,6 +128,8 @@ export class AuthService {
     loginName: string;
     password: string;
     clientIp: string;
+    connectionId?: string;
+    configGroup?: string;
   }): Promise<{ token: string; actor: Actor; expiresAt: string }> {
     await assertRateLimit(this.database, {
       action: 'login',
@@ -137,12 +140,11 @@ export class AuthService {
     const row = await findUser(this.database, input.accountId, input.loginName);
     const valid = row ? await bcrypt.compare(input.password, row.password_hash) : false;
     if (!row || !valid) {
-      throw new AppError('账号或密码错误', 401, 'INVALID_CREDENTIALS');
+      throw new AppError(message('auth.invalidCredentials'), 401, 'INVALID_CREDENTIALS');
     }
     if (row.user_status !== 'ACTIVE' || row.account_status !== 'READY') {
-      throw new AppError('账号已停用', 403, 'ACCOUNT_DISABLED');
+      throw new AppError(message('auth.accountDisabled'), 403, 'ACCOUNT_DISABLED');
     }
-
     const token = randomToken();
     const expiresAt = new Date(Date.now() + this.config.STUDIO_LOGIN_SESSION_TTL_SECONDS * 1000);
     await this.database.execute(
@@ -165,7 +167,7 @@ export class AuthService {
          FROM sessions s
          JOIN users u ON u.user_id = s.user_id
          JOIN accounts a ON a.account_id = u.account_id
-        WHERE s.token_hash = ? AND s.expires_at > UTC_TIMESTAMP(3)
+        WHERE s.token_hash = ? AND s.expires_at > CURRENT_TIMESTAMP(3)
         LIMIT 1`,
       [sha256(token)],
     );
@@ -176,7 +178,7 @@ export class AuthService {
 
   async requireActor(request: FastifyRequest): Promise<Actor> {
     const actor = await this.actorFromRequest(request);
-    if (!actor) throw new AppError('请先登录', 401, 'UNAUTHORIZED');
+    if (!actor) throw new AppError(message('auth.unauthorized'), 401, 'UNAUTHORIZED');
     return actor;
   }
 
@@ -184,7 +186,7 @@ export class AuthService {
     const actor = await this.requireActor(request);
     if (actor.role === 'SYSTEM_ADMIN') return actor;
     if (actor.role !== 'ACCOUNT_ADMIN' || (accountId && actor.accountId !== accountId)) {
-      throw new AppError('需要管理员权限', 403, 'ADMIN_REQUIRED');
+      throw new AppError(message('auth.adminRequired'), 403, 'ADMIN_REQUIRED');
     }
     return actor;
   }

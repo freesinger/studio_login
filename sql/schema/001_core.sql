@@ -139,8 +139,8 @@ CREATE TABLE IF NOT EXISTS operator_prices (
   app_id VARCHAR(64) NOT NULL DEFAULT '*',
   billing_item_id VARCHAR(128) NOT NULL,
   unit VARCHAR(32) NOT NULL,
-  customer_unit_price DECIMAL(20,8) NOT NULL,
-  cost_unit_price DECIMAL(20,8) NOT NULL DEFAULT 0,
+  customer_unit_price DECIMAL(20,10) NOT NULL,
+  cost_unit_price DECIMAL(20,10) NOT NULL DEFAULT 0,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   updated_by VARCHAR(64) NOT NULL,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
@@ -174,21 +174,23 @@ CREATE TABLE IF NOT EXISTS studio_tasks (
 
 CREATE TABLE IF NOT EXISTS studio_task_items (
   task_id VARCHAR(64) NOT NULL,
+  item_index INT NOT NULL DEFAULT 0,
   billing_item_id VARCHAR(128) NOT NULL,
   unit VARCHAR(32) NOT NULL,
   estimated_usage DECIMAL(20,6) NOT NULL,
   actual_usage DECIMAL(20,6) NULL,
-  customer_unit_price DECIMAL(20,8) NOT NULL,
-  cost_unit_price DECIMAL(20,8) NOT NULL,
+  customer_unit_price DECIMAL(20,10) NOT NULL,
+  cost_unit_price DECIMAL(20,10) NOT NULL,
   status VARCHAR(32) NOT NULL DEFAULT 'RUNNING',
-  PRIMARY KEY (task_id, billing_item_id),
+  PRIMARY KEY (task_id, item_index),
+  KEY idx_studio_task_items_billing_item (task_id, billing_item_id),
   CONSTRAINT fk_studio_task_items_task FOREIGN KEY (task_id) REFERENCES studio_tasks(task_id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS period_usage (
   app_id VARCHAR(64) NOT NULL,
   subject_type VARCHAR(32) NOT NULL,
-  subject_id VARCHAR(64) NOT NULL,
+  subject_id VARCHAR(128) NOT NULL,
   billing_period CHAR(7) NOT NULL,
   reserved_amount DECIMAL(20,6) NOT NULL DEFAULT 0,
   actual_amount DECIMAL(20,6) NOT NULL DEFAULT 0,

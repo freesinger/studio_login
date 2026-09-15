@@ -1,5 +1,8 @@
 import { Decimal } from 'decimal.js';
 
+import { deploymentTimeZone } from './deployment.js';
+import { translate } from './i18n.js';
+
 export interface QuotaSnapshot {
   limit: string | null;
   actualAmount: string;
@@ -16,15 +19,15 @@ function formattedAmount(value: Decimal): string {
   return value.toDecimalPlaces(6, Decimal.ROUND_HALF_UP).toFixed(6);
 }
 
-export function currentBillingPeriod(now = new Date()): string {
+export function currentBillingPeriod(now = new Date(), timeZone = deploymentTimeZone()): string {
   const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Shanghai',
+    timeZone,
     year: 'numeric',
     month: '2-digit',
   }).formatToParts(now);
   const year = parts.find(part => part.type === 'year')?.value;
   const month = parts.find(part => part.type === 'month')?.value;
-  if (!year || !month) throw new Error('无法生成账期');
+  if (!year || !month) throw new Error(translate('billing.periodUnavailable', 'zh-CN'));
   return `${year}-${month}`;
 }
 

@@ -1,5 +1,6 @@
 import type { RowDataPacket } from 'mysql2/promise';
 
+import { message } from './i18n.js';
 import type { Database } from './db.js';
 import { AppError } from './errors.js';
 
@@ -39,7 +40,7 @@ export async function assertRateLimit(
       [sameWindow ? current.window_started_at : now, nextCount, input.action, input.subject],
     );
     if (nextCount > input.limit) {
-      throw new AppError('操作过于频繁，请稍后再试', 429, 'RATE_LIMITED');
+      throw new AppError(message('errors.rateLimited'), 429, 'RATE_LIMITED');
     }
   });
 }

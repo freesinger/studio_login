@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import mysql, { type RowDataPacket } from 'mysql2/promise';
 
+import { translate } from './i18n.js';
 import type { AppConfig } from './config.js';
 import {
   findDatabaseSchemaIssues,
@@ -24,10 +25,11 @@ interface ColumnRow extends RowDataPacket, DatabaseColumnInfo {}
 export async function migrateDatabase(config: AppConfig): Promise<void> {
   const connection = await mysql.createConnection({
     uri: config.STUDIO_LOGIN_DATABASE_URL.replace(/^mysql2:/, 'mysql:'),
-    timezone: 'Z',
+    timezone: '+08:00',
     multipleStatements: true,
   });
   try {
+    await connection.query("SET time_zone = '+08:00'");
     const [existingRows] = await connection.query<TableRow[]>(
       `SELECT TABLE_NAME AS tableName
          FROM information_schema.tables
@@ -38,7 +40,7 @@ export async function migrateDatabase(config: AppConfig): Promise<void> {
       .filter(table => managedDatabaseTables.includes(table));
     if (!existingManagedTables.includes('schema_migrations') && existingManagedTables.length > 0) {
       throw incompatibleSchemaError([
-        `目标库在首次迁移前已存在同名表 ${existingManagedTables.sort().join(', ')}`,
+        translate('startup.existingTables', 'zh-CN', { tables: existingManagedTables.sort().join(', ') }),
       ]);
     }
 

@@ -1,6 +1,11 @@
 import type { RowDataPacket } from 'mysql2/promise';
 
-import { BillingService, type BaselineCallbackInput } from './billing.js';
+import { translate } from './i18n.js';
+import {
+  BillingService,
+  type BaselineCallbackInput,
+  type ReconciliationAudit,
+} from './billing.js';
 import type { AppConfig } from './config.js';
 import type { Database } from './db.js';
 import { noopLogger, type AppLogger } from './logging.js';
@@ -28,6 +33,7 @@ interface RemoteUsageItem {
 interface RemoteUsageRequest {
   RequestId: string;
   UserId: string;
+  ProjectId?: string;
   Status: 'PROCESSING' | 'SUCCEEDED' | 'FAILED';
   Items: RemoteUsageItem[];
 }
@@ -53,15 +59,15 @@ function parseRemoteUsage(payload: unknown, requestId: string): RemoteUsageReque
   if (!isRecord(remote)) return null;
   const status = readString(remote.Status);
   if (!['PROCESSING', 'SUCCEEDED', 'FAILED'].includes(status)) {
-    throw new Error('Studio 返回了不支持的用量状态');
+    throw new Error(translate('reconcile.unsupportedStatus', 'zh-CN'));
   }
   const items = Array.isArray(remote.Items) ? remote.Items.map(item => {
-    if (!isRecord(item)) throw new Error('Studio 返回了非法的用量明细');
+    if (!isRecord(item)) throw new Error(translate('reconcile.invalidUsage', 'zh-CN'));
     const billingItemId = readString(item.BillingItemId);
     const unit = readString(item.Unit);
     const usage = item.Usage;
     if (!billingItemId || !unit || (typeof usage !== 'number' && typeof usage !== 'string')) {
-      throw new Error('Studio 返回了非法的用量明细');
+      throw new Error(translate('reconcile.invalidUsage', 'zh-CN'));
     }
     const modelId = readString(item.ModelId);
     const billingContext = readString(item.BillingContext);
@@ -74,11 +80,12 @@ function parseRemoteUsage(payload: unknown, requestId: string): RemoteUsageReque
     };
   }) : [];
   if (status === 'SUCCEEDED' && items.length === 0) {
-    throw new Error('Studio 成功用量缺少计费明细');
+    throw new Error(translate('reconcile.missingBillingDetails', 'zh-CN'));
   }
   return {
     RequestId: requestId,
     UserId: readString(remote.UserId),
+    ...(readString(remote.ProjectId) ? { ProjectId: readString(remote.ProjectId) } : {}),
     Status: status as RemoteUsageRequest['Status'],
     Items: items,
   };
@@ -112,7 +119,7 @@ export class BillingReconciler {
           AND t.created_at <= ?
           AND t.reconcile_attempts < ?
           AND (t.next_reconcile_at IS NULL
-            OR t.next_reconcile_at <= DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 8 HOUR))
+            OR t.next_reconcile_at <= CURRENT_TIMESTAMP(3))
         ORDER BY t.created_at ASC, t.task_id ASC
         LIMIT ?`,
       [cutoff, maxAttempts, input.limit],
@@ -121,6 +128,7 @@ export class BillingReconciler {
     const targets = new Map<string, Awaited<ReturnType<StudioConnectionService['usageQueryTarget']>>>();
 
     for (const task of rows) {
+      let reconciliationAudit: ReconciliationAudit | undefined;
       try {
         const targetKey = `${task.connection_id}\0${task.request_id}`;
         let target = targets.get(targetKey);
@@ -133,7 +141,20 @@ export class BillingReconciler {
           );
           targets.set(targetKey, target);
         }
-        const response = await fetch(`${target.studioBaseUrl}/api/v1/open/usage/get`, {
+        const url = `${target.studioBaseUrl}/api/v1/open/usage/get`;
+        const requestBody = { RequestIds: [task.request_id] };
+        reconciliationAudit = {
+          request: {
+            method: 'POST',
+            url,
+            body: requestBody,
+          },
+          response: {
+            httpStatus: null,
+            body: null,
+          },
+        };
+        const response = await fetch(url, {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
@@ -142,16 +163,39 @@ export class BillingReconciler {
             'x-request-id': task.request_id,
             'x-las-request-id': task.request_id,
           },
-          body: JSON.stringify({ RequestIds: [task.request_id] }),
+          body: JSON.stringify(requestBody),
           signal: AbortSignal.timeout(5_000),
         });
-        if (!response.ok) throw new Error(`Studio 用量查询失败: HTTP ${response.status}`);
-        const remote = parseRemoteUsage(await response.json(), task.request_id);
+        const responseText = await response.text();
+        let responseBody: unknown = responseText;
+        if (responseText) {
+          try {
+            responseBody = JSON.parse(responseText) as unknown;
+          } catch {
+            // Keep a non-JSON response verbatim for audit and diagnostics.
+          }
+        } else {
+          responseBody = null;
+        }
+        reconciliationAudit.response = {
+          httpStatus: response.status,
+          body: responseBody,
+        };
+        if (!response.ok) {
+          throw new Error(translate('reconcile.queryFailed', 'zh-CN', { status: response.status }));
+        }
+        const remote = parseRemoteUsage(responseBody, task.request_id);
         if (!remote || remote.Status === 'PROCESSING') {
           result.skipped += 1;
           const remoteStatus = remote?.Status ?? 'NOT_FOUND';
           const retry = retryPlan(task.reconcile_attempts, maxAttempts, backoffBaseSeconds);
-          await this.markReconcileStatus(task.task_id, retry.status(remoteStatus), null, retry);
+          await this.markReconcileStatus(
+            task.task_id,
+            retry.status(remoteStatus),
+            null,
+            retry,
+            reconciliationAudit,
+          );
           const ageMinutes = Math.floor((Date.now() - task.created_at.getTime()) / 60_000);
           const stale = ageMinutes >= staleMinutes;
           this.logger[stale ? 'warn' : 'debug']({
@@ -185,15 +229,21 @@ export class BillingReconciler {
           continue;
         }
         if (remote.UserId && remote.UserId !== task.login_name) {
-          throw new Error('Studio 用量 UserId 与本地任务不匹配');
+          throw new Error(translate('reconcile.userMismatch', 'zh-CN'));
         }
         const callback: BaselineCallbackInput = {
           RequestId: task.request_id,
           UserId: task.login_name,
+          ...(remote.ProjectId ? { ProjectId: remote.ProjectId } : {}),
           Status: remote.Status,
           Items: remote.Items,
         };
-        await this.billing.callback(task.connection_id, task.app_id, callback);
+        await this.billing.callback(
+          task.connection_id,
+          task.app_id,
+          callback,
+          reconciliationAudit,
+        );
         await this.markReconcileStatus(task.task_id, remote.Status, null, {
           attempt: task.reconcile_attempts + 1,
           exhausted: false,
@@ -211,7 +261,13 @@ export class BillingReconciler {
       } catch (error) {
         result.failed += 1;
         const retry = retryPlan(task.reconcile_attempts, maxAttempts, backoffBaseSeconds);
-        await this.markReconcileStatus(task.task_id, retry.status('ERROR'), errorMessage(error), retry);
+        await this.markReconcileStatus(
+          task.task_id,
+          retry.status('ERROR'),
+          errorMessage(error),
+          retry,
+          reconciliationAudit,
+        );
         this.logger.warn({
           err: error,
           event: 'billing_reconcile_item_failed',
@@ -233,15 +289,32 @@ export class BillingReconciler {
     status: string,
     error: string | null,
     retry: ReconcileRetryUpdate,
+    audit?: ReconciliationAudit,
   ): Promise<void> {
     await this.database.execute(
       `UPDATE studio_tasks
-          SET last_reconcile_at = DATE_ADD(UTC_TIMESTAMP(3), INTERVAL 8 HOUR),
+          SET last_reconcile_at = CURRENT_TIMESTAMP(3),
               last_reconcile_status = ?,
               last_reconcile_error = ?,
               reconcile_error_info = ?,
               reconcile_attempts = ?,
-              next_reconcile_at = ?
+              next_reconcile_at = ?,
+              billing_audit_payload = CASE WHEN ? IS NULL
+                THEN billing_audit_payload
+                ELSE JSON_ARRAY_APPEND(
+                  JSON_SET(
+                    COALESCE(billing_audit_payload, JSON_OBJECT()),
+                    '$.version', 1,
+                    '$.reconciliationQueries',
+                    COALESCE(
+                      JSON_EXTRACT(billing_audit_payload, '$.reconciliationQueries'),
+                      JSON_ARRAY()
+                    )
+                  ),
+                  '$.reconciliationQueries',
+                  CAST(? AS JSON)
+                )
+              END
         WHERE task_id = ?`,
       [
         status.slice(0, 32),
@@ -249,6 +322,11 @@ export class BillingReconciler {
         error ? error.slice(0, 1024) : null,
         retry.attempt,
         retry.nextReconcileAt,
+        audit ? 1 : null,
+        audit ? JSON.stringify({
+          ...audit,
+          recordedAt: new Date().toISOString(),
+        }) : null,
         taskId,
       ],
     );

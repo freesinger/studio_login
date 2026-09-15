@@ -27,6 +27,7 @@ export function createAppLogger(config: AppConfig): Logger {
         'req.headers.x-las-api-key',
         'req.headers.x-las-integration-token',
         'res.headers.set-cookie',
+        'body.apiKey',
         'body.password',
         'body.csv',
         'body.integrationToken',

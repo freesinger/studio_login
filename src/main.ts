@@ -25,7 +25,7 @@ try {
   );
   const stopReconcile = startBillingReconcileScheduler({
     config,
-    reconciler: new BillingReconciler(database, connections, new BillingService(database), logger),
+    reconciler: new BillingReconciler(database, connections, new BillingService(database, config), logger),
     logger,
   });
   const shutdown = async (): Promise<void> => {

@@ -81,42 +81,6 @@ function collectFromConfig(
   configGroupId: string,
   configGroupName: string,
 ): void {
-  for (const value of arrayValue(config.customLlmModelConfigs)) {
-    if (!isRecord(value)) continue;
-    const model = safeModelName(readString(value, 'model', 'modelName', 'name', 'id'));
-    if (!model) continue;
-    pushItem(items, {
-      billingItemId: `openai_responses_${model}`,
-      unit: 'request',
-      operatorId: 'openai_responses',
-      modelName: model,
-      configGroupId,
-      configGroupName,
-    });
-  }
-
-  for (const value of arrayValue(config.customImageModelConfigs)) {
-    if (!isRecord(value)) continue;
-    const model = safeModelName(readString(value, 'model', 'modelName', 'name', 'id'));
-    if (!model) continue;
-    pushItem(items, {
-      billingItemId: `openai_image_generations_${model}`,
-      unit: 'image',
-      operatorId: 'openai_image_generations',
-      modelName: model,
-      configGroupId,
-      configGroupName,
-    });
-    pushItem(items, {
-      billingItemId: `openai_image_edits_${model}`,
-      unit: 'image',
-      operatorId: 'openai_image_edits',
-      modelName: model,
-      configGroupId,
-      configGroupName,
-    });
-  }
-
   for (const value of arrayValue(config.customModels)) {
     if (!isRecord(value)) continue;
     const model = safeModelName(readString(value, 'model', 'modelName', 'name', 'id'));
