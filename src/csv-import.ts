@@ -1,6 +1,7 @@
 import { parse } from 'csv-parse/sync';
 import { ZodError } from 'zod';
 
+import { message, formatMessage, formatValidationIssues, translate, type Locale, type LocalizedMessage } from './i18n.js';
 import { AppError } from './errors.js';
 
 export interface CsvImportItem {
@@ -22,25 +23,26 @@ export function parseCsvRecords(csv: string): Record<string, string>[] {
     rows = parse(csv, {
       bom: true,
       columns: true,
-      relax_column_count: false,
+      relax_column_count: true,
       skip_empty_lines: true,
       trim: true,
     }) as Record<string, string>[];
   } catch {
-    throw new AppError('CSV 格式不合法，请使用下载的模板', 400, 'INVALID_CSV');
+    throw new AppError(message('csv.invalidFormat'), 400, 'INVALID_CSV');
   }
   if (rows.length === 0) {
-    throw new AppError('CSV 没有可导入的数据行', 400, 'EMPTY_CSV');
+    throw new AppError(message('csv.empty'), 400, 'EMPTY_CSV');
   }
   if (rows.length > 100) {
-    throw new AppError('单次最多导入 100 行', 400, 'CSV_ROW_LIMIT_EXCEEDED');
+    throw new AppError(message('csv.rowLimit'), 400, 'CSV_ROW_LIMIT_EXCEEDED');
   }
   return rows;
 }
 
 export async function importCsvRows(
   rows: readonly Record<string, string>[],
-  work: (row: Record<string, string>) => Promise<string>,
+  work: (row: Record<string, string>) => Promise<string | LocalizedMessage>,
+  locale: Locale = 'zh-CN',
 ): Promise<CsvImportResult> {
   const items: CsvImportItem[] = [];
   const concurrency = 5;
@@ -49,9 +51,9 @@ export async function importCsvRows(
     const results = await Promise.all(batch.map(async (row, index) => {
       const rowNumber = offset + index + 2;
       try {
-        return { row: rowNumber, success: true, message: await work(row) };
+        return { row: rowNumber, success: true, message: formatMessage(await work(row), locale) };
       } catch (error) {
-        return { row: rowNumber, success: false, message: importErrorMessage(error) };
+        return { row: rowNumber, success: false, message: importErrorMessage(error, locale) };
       }
     }));
     items.push(...results);
@@ -65,11 +67,12 @@ export async function importCsvRows(
   };
 }
 
-function importErrorMessage(error: unknown): string {
+function importErrorMessage(error: unknown, locale: Locale): string {
   if (error instanceof ZodError) {
-    return error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('；');
+    const issues = formatValidationIssues(error.issues, locale);
+    return issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join(locale === 'en' ? '; ' : '；');
   }
-  if (error instanceof AppError) return error.message;
-  if ((error as { code?: string }).code === 'ER_DUP_ENTRY') return '记录已存在';
-  return '导入失败';
+  if (error instanceof AppError) return error.localize(locale);
+  if ((error as { code?: string }).code === 'ER_DUP_ENTRY') return translate('csv.recordExists', locale);
+  return translate('csv.failed', locale);
 }

@@ -4,7 +4,11 @@ import { createHash } from 'node:crypto';
 
 import { z } from 'zod';
 
+import { DEFAULT_PRICES, deploymentTimeZone, type DefaultPrices } from './deployment.js';
+import { translate } from './i18n.js';
+
 const envSchema = z.object({
+  STUDIO_LOGIN_CURRENCY: z.enum(['CNY', 'USD']).default('CNY'),
   APP_ENV: z.enum(['local', 'test', 'production']).default('local'),
   HOST: z.string().default('0.0.0.0'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3100),
@@ -13,7 +17,7 @@ const envSchema = z.object({
   ]).default('info'),
   STUDIO_LOGIN_DATABASE_URL: z.string().url().refine(
     value => value.startsWith('mysql://') || value.startsWith('mysql2://'),
-    'STUDIO_LOGIN_DATABASE_URL 必须使用 mysql:// 或 mysql2://',
+    translate('startup.databaseProtocol', 'zh-CN'),
   ),
   STUDIO_LOGIN_DB_CONNECTION_LIMIT: z.coerce.number().int().min(1).max(100).default(10),
   STUDIO_LOGIN_ACCOUNT_ID: z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/),
@@ -33,6 +37,8 @@ const envSchema = z.object({
 });
 
 export type AppConfig = z.infer<typeof envSchema> & {
+  timeZone: string;
+  defaultPrices: DefaultPrices;
   encryptionKey: Buffer;
   STUDIO_LOGIN_SESSION_TTL_SECONDS: number;
   STUDIO_LOGIN_TICKET_TTL_SECONDS: number;
@@ -40,18 +46,19 @@ export type AppConfig = z.infer<typeof envSchema> & {
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const parsed = envSchema.parse(env);
+  const timeZone = deploymentTimeZone(env.TZ ?? '');
   if (Boolean(parsed.LAS_STUDIO_BASE_URL) !== Boolean(parsed.STUDIO_LOGIN_PUBLIC_BASE_URL)) {
-    throw new Error('LAS_STUDIO_BASE_URL 和 STUDIO_LOGIN_PUBLIC_BASE_URL 必须同时配置或同时省略');
+    throw new Error(translate('startup.baseUrlsPaired', 'zh-CN'));
   }
   if (parsed.APP_ENV === 'production'
       && parsed.STUDIO_LOGIN_PUBLIC_BASE_URL
       && new URL(parsed.STUDIO_LOGIN_PUBLIC_BASE_URL).protocol !== 'https:') {
-    throw new Error('production 环境的 STUDIO_LOGIN_PUBLIC_BASE_URL 必须使用 HTTPS');
+    throw new Error(translate('startup.loginHttpsRequired', 'zh-CN'));
   }
   if (parsed.APP_ENV === 'production'
       && parsed.LAS_STUDIO_BASE_URL
       && new URL(parsed.LAS_STUDIO_BASE_URL).protocol !== 'https:') {
-    throw new Error('production 环境的 LAS_STUDIO_BASE_URL 必须使用 HTTPS');
+    throw new Error(translate('startup.studioHttpsRequired', 'zh-CN'));
   }
   const encryptionKey = createHash('sha256')
     .update('studio-login/config-encryption/v1\0', 'utf8')
@@ -60,6 +67,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   return {
     ...parsed,
     encryptionKey,
+    timeZone,
+    defaultPrices: { ...DEFAULT_PRICES },
     STUDIO_LOGIN_SESSION_TTL_SECONDS: 604_800,
     STUDIO_LOGIN_TICKET_TTL_SECONDS: 120,
   };
