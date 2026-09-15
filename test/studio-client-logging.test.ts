@@ -91,6 +91,46 @@ describe('StudioAdminClient logging', () => {
     });
   });
 
+  it('logs project and user identifiers for profile failures without logging credentials', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      code: 'INVALID_ARGUMENT',
+      message: 'LAS API Key is invalid',
+    }), {
+      status: 400,
+      headers: { 'content-type': 'application/json', 'x-request-id': 'studio-profile-request' },
+    })));
+    const entries: LogEntry[] = [];
+    const client = new StudioAdminClient(recordingLogger(entries));
+
+    await expect(client.upsertUserProfile({
+      studioBaseUrl: 'https://studio.example.com',
+      integrationToken: 'integration-token',
+    }, {
+      appId: 'app-1',
+      projectId: 'group-baseline',
+      userId: 'worker-1',
+      projectLevelSharing: false,
+      config: {
+        lasApiKey: 'las-secret-that-must-not-be-logged',
+        arkApiKey: 'ark-secret-that-must-not-be-logged',
+        tosBucketName: 'bucket-1',
+      },
+    })).rejects.toMatchObject({ code: 'STUDIO_API_FAILED' });
+
+    const failure = entries.find(entry => entry.fields.event === 'studio_api_request_failed');
+    expect(failure?.fields).toMatchObject({
+      operation: 'upsert_user_profile',
+      appId: 'app-1',
+      projectId: 'group-baseline',
+      userId: 'worker-1',
+      responseRequestId: 'studio-profile-request',
+      statusCode: 400,
+      upstreamCode: 'INVALID_ARGUMENT',
+    });
+    expect(JSON.stringify(entries)).not.toContain('las-secret-that-must-not-be-logged');
+    expect(JSON.stringify(entries)).not.toContain('ark-secret-that-must-not-be-logged');
+  });
+
   it('reads the non-sensitive Studio deployment profile', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
       code: 200,

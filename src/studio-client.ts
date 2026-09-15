@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
+import { message } from './i18n.js';
 import { AppError, StudioApiError } from './errors.js';
 import { noopLogger, type AppLogger } from './logging.js';
 import type { ResourceConfig } from './types.js';
@@ -34,7 +35,7 @@ export interface StudioBillingCatalogItem {
 
 export class StudioResourceProfileUnavailableError extends AppError {
   constructor(readonly requestId: string) {
-    super('Studio 未开放远端资源配置读取接口，当前展示本地缓存', 200, 'STUDIO_RESOURCE_PROFILE_UNAVAILABLE');
+    super(message('groups.remoteProfileUnavailable'), 200, 'STUDIO_RESOURCE_PROFILE_UNAVAILABLE');
   }
 }
 
@@ -42,6 +43,7 @@ interface StudioRequestContext {
   operation: string;
   appId: string;
   userId?: string;
+  projectId?: string;
 }
 
 function safeUpstreamMessage(value: unknown, integrationToken: string): string | null {
@@ -118,7 +120,7 @@ export class StudioAdminClient {
         targetOrigin,
       }, 'Studio API network request failed');
       throw new StudioApiError(
-        'Studio API 调用失败: 网络错误',
+        message('studio.networkError'),
         'STUDIO_NETWORK_ERROR',
         requestId,
       );
@@ -144,8 +146,8 @@ export class StudioAdminClient {
       }, 'Studio API returned an error response');
       throw new StudioApiError(
         upstream.message
-          ? `Studio API 调用失败: ${upstream.message}`
-          : `Studio API 调用失败: HTTP ${response.status}`,
+          ? message('studio.upstreamError', { message: upstream.message })
+          : message('studio.httpError', { status: response.status }),
         upstream.code,
         responseRequestId,
         response.status,
@@ -204,7 +206,12 @@ export class StudioAdminClient {
       userId: input.userId,
       projectLevelSharing: input.projectLevelSharing,
       ...input.config,
-    }, { operation: 'upsert_user_profile', appId: input.appId, userId: input.userId });
+    }, {
+      operation: 'upsert_user_profile',
+      appId: input.appId,
+      userId: input.userId,
+      projectId: input.projectId,
+    });
   }
 
   async upsertProjectProfile(connection: StudioConnection, input: {
@@ -218,7 +225,11 @@ export class StudioAdminClient {
       projectId: input.projectId,
       projectLevelSharing: input.projectLevelSharing,
       ...input.config,
-    }, { operation: 'upsert_project_profile', appId: input.appId });
+    }, {
+      operation: 'upsert_project_profile',
+      appId: input.appId,
+      projectId: input.projectId,
+    });
   }
 
   async deleteUserProfile(connection: StudioConnection, input: {
@@ -250,7 +261,7 @@ export class StudioAdminClient {
     const payload = await response.json() as { data?: Partial<StudioDeploymentProfile> };
     const profile = payload.data;
     if (!profile?.region || !profile.tosRegion || !Array.isArray(profile.requiredResourceFields)) {
-      throw new AppError('Studio 部署信息响应不完整', 502, 'STUDIO_DEPLOYMENT_PROFILE_INVALID');
+      throw new AppError(message('studio.invalidDeploymentProfile'), 502, 'STUDIO_DEPLOYMENT_PROFILE_INVALID');
     }
     return {
       region: profile.region,
@@ -303,12 +314,12 @@ export class StudioAdminClient {
     }, { operation: 'get_billing_catalog', appId });
     const payload = await response.json() as { data?: { items?: unknown } };
     if (!Array.isArray(payload.data?.items)) {
-      throw new AppError('Studio 计费目录响应不完整', 502, 'STUDIO_BILLING_CATALOG_INVALID');
+      throw new AppError(message('studio.invalidBillingCatalog'), 502, 'STUDIO_BILLING_CATALOG_INVALID');
     }
     return payload.data.items.map(item => {
       const value = item as Partial<StudioBillingCatalogItem>;
       if (!value.billingItemId || !value.unit || !Array.isArray(value.operatorIds)) {
-        throw new AppError('Studio 计费目录响应不完整', 502, 'STUDIO_BILLING_CATALOG_INVALID');
+        throw new AppError(message('studio.invalidBillingCatalog'), 502, 'STUDIO_BILLING_CATALOG_INVALID');
       }
       return {
         billingItemId: value.billingItemId,

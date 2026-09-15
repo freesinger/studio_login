@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import type { RowDataPacket } from 'mysql2/promise';
 
+import { translate, type Locale, message } from './i18n.js';
 import type { AppConfig } from './config.js';
 import type { Database } from './db.js';
 import { AppError, profileSyncError } from './errors.js';
@@ -71,8 +72,10 @@ interface SubaccountStatusRow extends RowDataPacket {
 }
 
 interface EditableSubaccountRow extends RowDataPacket {
+  user_id?: string;
   role: string;
   login_name: string;
+  status?: string;
 }
 
 interface ProfileTargetRow extends RowDataPacket {
@@ -121,6 +124,12 @@ interface UserBindingRow extends RowDataPacket {
   group_actual_amount: string | null;
 }
 
+interface ExistingUserBindingRow extends RowDataPacket {
+  config_group_id: string;
+  profile_sync_version: number | null;
+  profile_sync_error_code: string | null;
+}
+
 function groupId(): string {
   return `grp_${randomUUID().replaceAll('-', '')}`;
 }
@@ -136,7 +145,7 @@ function effectiveResourceConfig(
   const required = ['lasApiKey', 'arkApiKey', 'tosBucketName'] as const;
   for (const field of required) {
     if (!resourceConfig[field]?.trim()) {
-      throw new AppError(`资源配置缺少必填项: ${field}`, 400, 'RESOURCE_CONFIG_INCOMPLETE');
+      throw new AppError(message('groups.requiredFieldMissing', { field: field }), 400, 'RESOURCE_CONFIG_INCOMPLETE');
     }
   }
   return {
@@ -198,7 +207,7 @@ function normalizeBindings(input: {
     return true;
   });
   if (normalized.length === 0) {
-    throw new AppError('请至少选择一个配置组', 400, 'CONFIG_GROUP_REQUIRED');
+    throw new AppError(message('groups.selectionRequired'), 400, 'CONFIG_GROUP_REQUIRED');
   }
   const defaultIndex = normalized.findIndex(binding => binding.isDefault);
   return normalized.map((binding, index) => ({
@@ -283,7 +292,14 @@ export class ConfigGroupService {
       );
       const group = groups[0];
       if (!group || group.status === 'DELETED') {
-        throw new AppError('配置组不存在', 404, 'CONFIG_GROUP_NOT_FOUND');
+        throw new AppError(message('groups.notFound'), 404, 'CONFIG_GROUP_NOT_FOUND');
+      }
+      if (Boolean(group.project_level_sharing) && input.projectLevelSharing === false) {
+        throw new AppError(
+          message('groups.dataSharingCannotDisable'),
+          409,
+          'PROJECT_LEVEL_SHARING_IMMUTABLE',
+        );
       }
       const connectionId = input.connectionId ?? group.connection_id;
       const projectId = input.projectId?.trim() ?? group.project_id;
@@ -295,7 +311,7 @@ export class ConfigGroupService {
         );
         if (Number(users[0]?.count) > 0) {
           throw new AppError(
-            '配置组仍有关联子账号，不能切换 Studio 连接或 Project',
+            message('groups.connectionLocked'),
             409,
             'CONFIG_GROUP_BINDING_IN_USE',
           );
@@ -315,7 +331,7 @@ export class ConfigGroupService {
         [input.configGroupId],
       );
       const previous = versions[0];
-      if (!previous) throw new AppError('配置组版本不存在', 409, 'CONFIG_VERSION_NOT_FOUND');
+      if (!previous) throw new AppError(message('groups.versionNotFound'), 409, 'CONFIG_VERSION_NOT_FOUND');
       const version = Number(previous.version) + 1;
       const resourceConfig = effectiveResourceConfig({
         ...decryptJson<ResourceConfig>(previous.encrypted_config, this.config.encryptionKey),
@@ -364,12 +380,10 @@ export class ConfigGroupService {
     await this.createVersion(input);
     await this.database.execute(
       `UPDATE config_groups
-          SET name = project_id, monthly_limit = ?,
-              project_level_sharing = COALESCE(?, project_level_sharing)
+          SET name = project_id, monthly_limit = ?
         WHERE config_group_id = ? AND account_id = ?`,
       [
         input.monthlyLimit,
-        input.projectLevelSharing ?? null,
         input.configGroupId,
         input.accountId,
       ],
@@ -377,8 +391,8 @@ export class ConfigGroupService {
     return this.publish(input);
   }
 
-  async list(accountId: string): Promise<unknown[]> {
-    const billingPeriod = currentBillingPeriod();
+  async list(accountId: string, locale: Locale = 'zh-CN'): Promise<unknown[]> {
+    const billingPeriod = currentBillingPeriod(new Date(), this.config.timeZone);
     const groups = await this.database.query<GroupRow>(
       `SELECT g.config_group_id, g.account_id, g.connection_id, g.project_id, g.name,
               g.status, g.current_version, g.monthly_limit, g.is_default,
@@ -436,8 +450,9 @@ export class ConfigGroupService {
         resourceConfigSource = 'STUDIO';
       } catch (error) {
         resourceConfigSyncError = error instanceof StudioResourceProfileUnavailableError
-          ? 'Studio 未开放远端资源配置读取接口，当前展示本地缓存'
-          : error instanceof Error ? error.message : '读取 Studio 资源配置失败';
+          ? translate('groups.remoteProfileUnavailable', locale)
+          : error instanceof AppError ? error.localize(locale)
+            : error instanceof Error ? error.message : translate('groups.remoteReadFailed', locale);
       }
       result.push({
         configGroupId: group.config_group_id,
@@ -483,7 +498,7 @@ export class ConfigGroupService {
         ORDER BY version DESC LIMIT 1`,
       [configGroupId],
     );
-    if (!versions[0]) throw new AppError('配置组版本不存在', 409, 'CONFIG_VERSION_NOT_FOUND');
+    if (!versions[0]) throw new AppError(message('groups.versionNotFound'), 409, 'CONFIG_VERSION_NOT_FOUND');
     return versions[0];
   }
 
@@ -493,7 +508,7 @@ export class ConfigGroupService {
       [accountId, connectionId],
     );
     if (registrations[0]?.status !== 'READY') {
-      throw new AppError('请先完成 Studio 注册', 409, 'STUDIO_NOT_REGISTERED');
+      throw new AppError(message('connections.registrationRequired'), 409, 'STUDIO_NOT_REGISTERED');
     }
   }
 
@@ -507,7 +522,7 @@ export class ConfigGroupService {
     );
     const group = groups[0];
     if (!group || group.status === 'DELETED') {
-      throw new AppError('配置组不存在', 404, 'CONFIG_GROUP_NOT_FOUND');
+      throw new AppError(message('groups.notFound'), 404, 'CONFIG_GROUP_NOT_FOUND');
     }
     await this.requireStudioReady(input.accountId, group.connection_id);
     const version = await this.latestVersion(input.configGroupId);
@@ -595,11 +610,11 @@ export class ConfigGroupService {
       [accountId, ...ids],
     );
     if (rows.length !== ids.length) {
-      throw new AppError('存在不可用或未发布的配置组', 409, 'CONFIG_GROUP_NOT_AVAILABLE');
+      throw new AppError(message('groups.unavailableOrUnpublished'), 409, 'CONFIG_GROUP_NOT_AVAILABLE');
     }
     for (const row of rows) {
       if (Number(row.current_version) <= 0) {
-        throw new AppError('存在未发布的配置组', 409, 'CONFIG_GROUP_NOT_AVAILABLE');
+        throw new AppError(message('groups.unpublished'), 409, 'CONFIG_GROUP_NOT_AVAILABLE');
       }
       await this.requireStudioReady(accountId, row.connection_id);
     }
@@ -617,13 +632,8 @@ export class ConfigGroupService {
         input.group.encrypted_config,
         this.config.encryptionKey,
       );
-      await this.studioConnections.upsertProjectProfile(
-        input.accountId,
-        input.group.connection_id,
-        input.group.project_id,
-        resourceConfig,
-        Boolean(input.group.project_level_sharing),
-      );
+      // The PROJECT profile is owned by config-group publish/update. A user binding
+      // only creates or refreshes this specific USER profile, never the PROJECT row.
       await this.studioConnections.upsertUserProfile(
         input.accountId,
         input.group.connection_id,
@@ -669,10 +679,13 @@ export class ConfigGroupService {
     const groups = await this.bindingGroups(input.accountId, normalized);
     const groupById = new Map(groups.map(group => [group.config_group_id, group]));
     const defaultBinding = normalized.find(binding => binding.isDefault) ?? normalized[0]!;
-    const existing = await this.database.query<{ config_group_id: string } & RowDataPacket>(
-      'SELECT config_group_id FROM user_config_group_bindings WHERE user_id = ?',
+    const existing = await this.database.query<ExistingUserBindingRow>(
+      `SELECT config_group_id, profile_sync_version, profile_sync_error_code
+         FROM user_config_group_bindings
+        WHERE user_id = ?`,
       [input.userId],
     );
+    const existingByGroupId = new Map(existing.map(binding => [binding.config_group_id, binding]));
     const nextIds = new Set(normalized.map(binding => binding.configGroupId));
     for (const old of existing) {
       if (nextIds.has(old.config_group_id)) continue;
@@ -710,7 +723,7 @@ export class ConfigGroupService {
       );
     }
     const defaultGroup = groupById.get(defaultBinding.configGroupId);
-    if (!defaultGroup) throw new AppError('默认配置组不可用', 409, 'CONFIG_GROUP_NOT_AVAILABLE');
+    if (!defaultGroup) throw new AppError(message('groups.defaultUnavailable'), 409, 'CONFIG_GROUP_NOT_AVAILABLE');
     await this.database.execute(
       `UPDATE users
           SET config_group_id = ?, monthly_limit = ?
@@ -719,10 +732,14 @@ export class ConfigGroupService {
     );
 
     let synced = 0;
-    let failed = 0;
     for (const binding of normalized) {
       const group = groupById.get(binding.configGroupId);
       if (!group) continue;
+      const previous = existingByGroupId.get(binding.configGroupId);
+      const needsProfileSync = !previous
+        || Number(previous.profile_sync_version ?? 0) !== Number(group.version)
+        || Boolean(previous.profile_sync_error_code);
+      if (!needsProfileSync) continue;
       const result = await this.syncBinding({
         accountId: input.accountId,
         userId: input.userId,
@@ -730,8 +747,14 @@ export class ConfigGroupService {
         group,
       });
       if (result.success) synced += 1;
-      else failed += 1;
     }
+    const failureRows = await this.database.query<{ failed: number } & RowDataPacket>(
+      `SELECT COUNT(*) AS failed
+         FROM user_config_group_bindings
+        WHERE user_id = ? AND profile_sync_error_code IS NOT NULL`,
+      [input.userId],
+    );
+    const failed = Number(failureRows[0]?.failed ?? 0);
     return {
       synced,
       failed,
@@ -751,29 +774,70 @@ export class ConfigGroupService {
   }): Promise<{ userId: string; status: string }> {
     const bindings = normalizeBindings(input);
     const defaultBinding = bindings.find(binding => binding.isDefault) ?? bindings[0]!;
-    const id = userId();
+    const loginName = input.loginName.trim();
     const passwordHash = await bcrypt.hash(input.password, 12);
     const passwordCipher = encryptJson(input.password, this.config.encryptionKey);
-    await this.database.execute(
-      `INSERT INTO users
-        (user_id, account_id, login_name, display_name, password_hash, password_cipher, role, status,
-         config_group_id, profile_sync_version, monthly_limit)
-       VALUES (?, ?, ?, ?, ?, ?, 'SUBACCOUNT', 'PROVISIONING', ?, NULL, ?)`,
-      [
-        id,
-        input.accountId,
-        input.loginName.trim(),
-        input.displayName.trim(),
-        passwordHash,
-        passwordCipher,
-        defaultBinding.configGroupId,
-        defaultBinding.monthlyLimit,
-      ],
-    );
+    const id = await this.database.transaction(async tx => {
+      const existingRows = await tx.query<EditableSubaccountRow>(
+        `SELECT user_id, role, status, login_name
+           FROM users
+          WHERE account_id = ? AND login_name = ?
+          FOR UPDATE`,
+        [input.accountId, loginName],
+      );
+      const existing = existingRows[0];
+      if (!existing) {
+        const nextId = userId();
+        await tx.execute(
+          `INSERT INTO users
+            (user_id, account_id, login_name, display_name, password_hash, password_cipher, role, status,
+             config_group_id, profile_sync_version, monthly_limit)
+           VALUES (?, ?, ?, ?, ?, ?, 'SUBACCOUNT', 'PROVISIONING', ?, NULL, ?)`,
+          [
+            nextId,
+            input.accountId,
+            loginName,
+            input.displayName.trim(),
+            passwordHash,
+            passwordCipher,
+            defaultBinding.configGroupId,
+            defaultBinding.monthlyLimit,
+          ],
+        );
+        return nextId;
+      }
+      if (existing.role !== 'SUBACCOUNT' || existing.status !== 'DELETED' || !existing.user_id) {
+        throw new AppError(message('users.loginNameExists'), 409, 'SUBACCOUNT_ALREADY_EXISTS');
+      }
+      await tx.execute(
+        `UPDATE users
+            SET display_name = ?, password_hash = ?, password_cipher = ?,
+                role = 'SUBACCOUNT', status = 'PROVISIONING',
+                config_group_id = ?, profile_sync_version = NULL,
+                profile_sync_error_code = NULL, profile_sync_error_message = NULL,
+                profile_sync_request_id = NULL, monthly_limit = ?
+          WHERE account_id = ? AND user_id = ?`,
+        [
+          input.displayName.trim(),
+          passwordHash,
+          passwordCipher,
+          defaultBinding.configGroupId,
+          defaultBinding.monthlyLimit,
+          input.accountId,
+          existing.user_id,
+        ],
+      );
+      await tx.execute('DELETE FROM sessions WHERE user_id = ?', [existing.user_id]);
+      await tx.execute(
+        'DELETE FROM user_config_group_bindings WHERE user_id = ?',
+        [existing.user_id],
+      );
+      return existing.user_id;
+    });
     const result = await this.replaceUserBindings({
       accountId: input.accountId,
       userId: id,
-      loginName: input.loginName.trim(),
+      loginName,
       bindings,
     });
     await this.database.execute(
@@ -791,7 +855,7 @@ export class ConfigGroupService {
     );
     if (result.failed > 0) {
       throw new AppError(
-        `子账号已创建，但有 ${result.failed} 个配置组同步 Studio 失败`,
+        message('users.createdWithSyncFailures', { count: result.failed }),
         502,
         'PROFILE_SYNC_FAILED',
       );
@@ -808,13 +872,13 @@ export class ConfigGroupService {
       [accountId, nameOrId.trim(), nameOrId.trim()],
     );
     if (!groups[0]) {
-      throw new AppError(`配置组不可用: ${nameOrId}`, 400, 'CONFIG_GROUP_NOT_AVAILABLE');
+      throw new AppError(message('groups.unavailable', { name: nameOrId }), 400, 'CONFIG_GROUP_NOT_AVAILABLE');
     }
     return groups[0].config_group_id;
   }
 
   async listSubaccounts(accountId: string): Promise<unknown[]> {
-    const billingPeriod = currentBillingPeriod();
+    const billingPeriod = currentBillingPeriod(new Date(), this.config.timeZone);
     const rows = await this.database.query<SubaccountRow>(
       `SELECT u.user_id, u.login_name, u.display_name, u.status, u.config_group_id,
               g.name AS config_group_name, u.monthly_limit,
@@ -891,6 +955,15 @@ export class ConfigGroupService {
         };
       });
       const defaultBinding = bindingViews.find(binding => binding.isDefault) ?? bindingViews[0];
+      const profileSyncFailures = bindingViews
+        .filter(binding => binding.profileSyncErrorMessage)
+        .map(binding => ({
+          configGroupId: binding.configGroupId,
+          configGroupName: binding.configGroupName,
+          errorCode: binding.profileSyncErrorCode,
+          errorMessage: binding.profileSyncErrorMessage,
+          requestId: binding.profileSyncRequestId,
+        }));
       result.push({
         userId: row.user_id,
         loginName: row.login_name,
@@ -903,9 +976,10 @@ export class ConfigGroupService {
         bindings: bindingViews,
         quota: defaultBinding?.quota ?? quotaSnapshot(row.monthly_limit, null, null),
         groupQuota: defaultBinding?.groupQuota ?? quotaSnapshot(null, null, null),
-        profileSyncErrorMessage: bindingViews.find(binding => binding.profileSyncErrorMessage)?.profileSyncErrorMessage ?? null,
-        profileSyncErrorCode: bindingViews.find(binding => binding.profileSyncErrorCode)?.profileSyncErrorCode ?? null,
-        profileSyncRequestId: bindingViews.find(binding => binding.profileSyncRequestId)?.profileSyncRequestId ?? null,
+        profileSyncFailures,
+        profileSyncErrorMessage: profileSyncFailures[0]?.errorMessage ?? null,
+        profileSyncErrorCode: profileSyncFailures[0]?.errorCode ?? null,
+        profileSyncRequestId: profileSyncFailures[0]?.requestId ?? null,
         password: row.password_cipher
           ? decryptJson<string>(row.password_cipher, this.config.encryptionKey)
           : null,
@@ -931,10 +1005,10 @@ export class ConfigGroupService {
       );
       const user = rows[0];
       if (!user || user.role !== 'SUBACCOUNT') {
-        throw new AppError('子账号不存在', 404, 'SUBACCOUNT_NOT_FOUND');
+        throw new AppError(message('users.notFound'), 404, 'SUBACCOUNT_NOT_FOUND');
       }
       if (user.status === 'DELETED') {
-        throw new AppError('已删除的子账号不能恢复', 409, 'SUBACCOUNT_DELETED');
+        throw new AppError(message('users.deletedCannotRestore'), 409, 'SUBACCOUNT_DELETED');
       }
       if (input.status === 'ACTIVE') {
         const ready = await tx.query<RowDataPacket>(
@@ -948,7 +1022,7 @@ export class ConfigGroupService {
           [input.userId],
         );
         if (!ready[0]) {
-          throw new AppError('资源配置未就绪，无法恢复账号', 409, 'PROFILE_NOT_SYNCED');
+          throw new AppError(message('users.cannotRestoreProfile'), 409, 'PROFILE_NOT_SYNCED');
         }
       }
       await tx.execute('UPDATE users SET status = ? WHERE user_id = ?', [input.status, input.userId]);
@@ -974,7 +1048,7 @@ export class ConfigGroupService {
       [input.accountId, input.userId],
     );
     if (!users[0] || users[0].role !== 'SUBACCOUNT') {
-      throw new AppError('子账号不存在', 404, 'SUBACCOUNT_NOT_FOUND');
+      throw new AppError(message('users.notFound'), 404, 'SUBACCOUNT_NOT_FOUND');
     }
     const passwordHash = input.password ? await bcrypt.hash(input.password, 12) : null;
     const passwordCipher = input.password
@@ -1027,7 +1101,7 @@ export class ConfigGroupService {
     );
     const user = users[0];
     if (!user || user.role !== 'SUBACCOUNT') {
-      throw new AppError('子账号不存在', 404, 'SUBACCOUNT_NOT_FOUND');
+      throw new AppError(message('users.notFound'), 404, 'SUBACCOUNT_NOT_FOUND');
     }
     const bindings = await this.database.query<{
       config_group_id: string;
@@ -1038,7 +1112,7 @@ export class ConfigGroupService {
       [input.userId],
     );
     if (bindings.length === 0) {
-      throw new AppError('子账号配置组未就绪', 409, 'PROFILE_NOT_SYNCED');
+      throw new AppError(message('users.groupNotReady'), 409, 'PROFILE_NOT_SYNCED');
     }
     const result = await this.replaceUserBindings({
       accountId: input.accountId,
@@ -1069,7 +1143,7 @@ export class ConfigGroupService {
     );
     const user = rows[0];
     if (!user || user.role !== 'SUBACCOUNT') {
-      throw new AppError('子账号不存在', 404, 'SUBACCOUNT_NOT_FOUND');
+      throw new AppError(message('users.notFound'), 404, 'SUBACCOUNT_NOT_FOUND');
     }
     const bindings = await this.database.query<{
       connection_id: string;
@@ -1114,7 +1188,7 @@ export class ConfigGroupService {
       [input.accountId, input.configGroupId],
     );
     if (Number(refs[0]?.count) > 0) {
-      throw new AppError('配置组仍有关联的非删除用户', 409, 'CONFIG_GROUP_IN_USE');
+      throw new AppError(message('groups.inUse'), 409, 'CONFIG_GROUP_IN_USE');
     }
     const result = await this.database.execute(
       `UPDATE config_groups SET status = 'DELETED'
@@ -1122,7 +1196,7 @@ export class ConfigGroupService {
       [input.accountId, input.configGroupId],
     );
     if (result.affectedRows !== 1) {
-      throw new AppError('配置组不存在', 404, 'CONFIG_GROUP_NOT_FOUND');
+      throw new AppError(message('groups.notFound'), 404, 'CONFIG_GROUP_NOT_FOUND');
     }
     return { configGroupId: input.configGroupId, status: 'DELETED' };
   }

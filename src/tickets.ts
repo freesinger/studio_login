@@ -1,5 +1,6 @@
 import type { RowDataPacket } from 'mysql2/promise';
 
+import { message } from './i18n.js';
 import type { AppConfig } from './config.js';
 import type { Database } from './db.js';
 import { AppError } from './errors.js';
@@ -40,7 +41,7 @@ export class TicketService {
     configGroup?: string,
   ): Promise<{ launchUrl: string; expiresAt: string }> {
     if (actor.role !== 'SUBACCOUNT') {
-      throw new AppError('管理员账号仅用于管理，请使用企业子账号进入 Studio', 403, 'STUDIO_CREATOR_ACCOUNT_REQUIRED');
+      throw new AppError(message('projects.subaccountRequired'), 403, 'STUDIO_CREATOR_ACCOUNT_REQUIRED');
     }
     const rows = await this.database.query<LaunchRow>(
       `SELECT u.status, u.login_name, b.config_group_id, b.profile_sync_version, g.current_version,
@@ -65,10 +66,10 @@ export class TicketService {
     );
     const row = rows[0];
     if (!row || row.status !== 'ACTIVE' || row.registration_status !== 'READY') {
-      throw new AppError('账号或 Studio 配置未就绪', 409, 'STUDIO_LOGIN_NOT_READY');
+      throw new AppError(message('projects.notReady'), 409, 'STUDIO_LOGIN_NOT_READY');
     }
     if (!row.config_group_id || !row.connection_id || !row.project_id || !row.connection_app_id) {
-      throw new AppError('资源配置尚未同步', 409, 'PROFILE_NOT_SYNCED');
+      throw new AppError(message('projects.profileNotSynced'), 409, 'PROFILE_NOT_SYNCED');
     }
 
     const ticket = randomToken();
@@ -76,8 +77,8 @@ export class TicketService {
     await this.database.transaction(async tx => {
       await tx.execute(
         `DELETE FROM studio_login_tickets
-          WHERE expires_at <= UTC_TIMESTAMP(3)
-             OR consumed_at < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 DAY)`,
+          WHERE expires_at <= CURRENT_TIMESTAMP(3)
+             OR consumed_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 1 DAY)`,
       );
       await tx.execute(
         `INSERT INTO studio_login_tickets
@@ -128,14 +129,14 @@ export class TicketService {
             AND g.status IN ('AVAILABLE', 'PARTIAL_FAILED')
             AND r.status = 'READY'
             AND t.consumed_at IS NULL
-            AND t.expires_at > UTC_TIMESTAMP(3)
+            AND t.expires_at > CURRENT_TIMESTAMP(3)
           FOR UPDATE`,
         [sha256(ticket), expectedConnectionId, expectedAppId, expectedAppId],
       );
       const row = rows[0];
       if (!row) throw new AppError('ticket invalid', 401, 'INVALID_STUDIO_TICKET');
       const result = await tx.execute(
-        `UPDATE studio_login_tickets SET consumed_at = UTC_TIMESTAMP(3)
+        `UPDATE studio_login_tickets SET consumed_at = CURRENT_TIMESTAMP(3)
           WHERE ticket_hash = ? AND consumed_at IS NULL`,
         [sha256(ticket)],
       );

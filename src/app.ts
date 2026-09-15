@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 
@@ -10,6 +13,7 @@ import Fastify, {
 } from 'fastify';
 import { z, ZodError } from 'zod';
 
+import { message, formatValidationIssues, requestLocale, translate, type LocalizedMessage } from './i18n.js';
 import { AuthService, SESSION_COOKIE_NAME } from './auth.js';
 import {
   BillingService,
@@ -63,11 +67,11 @@ const resourceConfigSchema = z.object({
 
 const nonNegativeAmount = z.union([z.string(), z.number()])
   .transform(String)
-  .refine(value => /^\d+(?:\.\d+)?$/.test(value), '金额必须是非负十进制数');
+  .refine(value => /^\d+(?:\.\d+)?$/.test(value), 'validation.nonNegativeAmount');
 
 const priceAmount = z.union([z.string(), z.number()])
   .transform(String)
-  .refine(value => /^\d+(?:\.\d{1,10})?$/.test(value), '价格必须是非负十进制数，最多 10 位小数');
+  .refine(value => /^\d+(?:\.\d{1,10})?$/.test(value), 'validation.pricePrecision');
 
 const optionalAmount = nonNegativeAmount.nullable().optional()
   .transform(value => value === null || value === undefined ? null : String(value));
@@ -183,14 +187,14 @@ const baselineItemSchema = z.object({
   Usage: z.union([z.number(), z.string()]),
   ModelId: z.string().max(128).optional(),
   BillingContext: z.string().max(20000).optional(),
-});
+}).passthrough();
 
 const precheckSchema = z.object({
   RequestId: z.string().min(1).max(128),
   UserId: z.string().min(1).max(128),
   ProjectId: z.string().min(1).max(128).optional(),
   Items: z.array(baselineItemSchema).min(1).max(100),
-});
+}).passthrough();
 
 const callbackSchema = precheckSchema.extend({
   Status: z.enum(['SUCCEEDED', 'FAILED', 'CANCELLED']),
@@ -226,7 +230,7 @@ function normalizeEndpointOrigin(endpoint: string): string {
   try {
     url = new URL(candidate);
   } catch {
-    throw new AppError('请输入有效的自定义渠道 Base URL', 400, 'CUSTOM_MODEL_CONNECTION_INVALID');
+    throw new AppError(message('customModels.invalidBaseUrl'), 400, 'CUSTOM_MODEL_CONNECTION_INVALID');
   }
   if (
     url.protocol !== 'https:'
@@ -237,7 +241,7 @@ function normalizeEndpointOrigin(endpoint: string): string {
     || url.hash
   ) {
     throw new AppError(
-      '请输入有效的自定义渠道 Base URL，不要包含路径、参数或片段',
+      message('customModels.baseUrlWithoutPath'),
       400,
       'CUSTOM_MODEL_CONNECTION_INVALID',
     );
@@ -269,14 +273,14 @@ function isLanguageModelResponse(payload: Record<string, unknown>): boolean {
   return typeof message?.content === 'string';
 }
 
-function customModelConnectionError(status: number): string {
-  if (status === 401 || status === 403) return 'API Key 无效或没有访问权限，请检查 API Key';
-  if (status === 404) return '模型或 Endpoint 不存在，请检查模型 ID 和 Endpoint';
-  if (status === 408 || status === 504) return '上游服务响应超时，请稍后重试';
-  if (status === 400 || status === 422) return '请求参数不正确，请检查模型类型和配置';
-  if (status === 429) return '请求过于频繁，请稍后重试';
-  if (status >= 500) return '上游模型服务暂时不可用，请稍后重试';
-  return '连接测试失败，请检查 Endpoint、模型 ID 和 API Key';
+function customModelConnectionError(status: number): LocalizedMessage {
+  if (status === 401 || status === 403) return message('customModels.invalidApiKey');
+  if (status === 404) return message('customModels.endpointNotFound');
+  if (status === 408 || status === 504) return message('customModels.upstreamTimeout');
+  if (status === 400 || status === 422) return message('customModels.invalidParameters');
+  if (status === 429) return message('customModels.rateLimited');
+  if (status >= 500) return message('customModels.upstreamUnavailable');
+  return message('customModels.connectionFailed');
 }
 
 async function testCustomModelConnection(input: z.infer<typeof customModelTestSchema>): Promise<void> {
@@ -333,14 +337,14 @@ async function testCustomModelConnection(input: z.infer<typeof customModelTestSc
       throw new AppError(customModelConnectionError(response.status), 502, 'CUSTOM_MODEL_CONNECTION_FAILED');
     }
     if (input.type === 'LANGUAGE' && !isLanguageModelResponse(payload)) {
-      throw new AppError('模型返回内容格式不正确，请检查模型类型和 Endpoint 配置', 502, 'CUSTOM_MODEL_CONNECTION_FAILED');
+      throw new AppError(message('customModels.invalidResponse'), 502, 'CUSTOM_MODEL_CONNECTION_FAILED');
     }
   } catch (error) {
     if (error instanceof AppError) throw error;
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new AppError('请求超时（120 秒）', 504, 'CUSTOM_MODEL_CONNECTION_TIMEOUT');
+      throw new AppError(message('customModels.timeout'), 504, 'CUSTOM_MODEL_CONNECTION_TIMEOUT');
     }
-    throw new AppError('网络请求失败，请检查 Endpoint 或确认上游服务已开放访问权限', 502, 'CUSTOM_MODEL_CONNECTION_FAILED');
+    throw new AppError(message('customModels.networkFailed'), 502, 'CUSTOM_MODEL_CONNECTION_FAILED');
   } finally {
     clearTimeout(timeout);
   }
@@ -368,11 +372,16 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     root: fileURLToPath(new URL('../public', import.meta.url)),
     prefix: '/',
   });
-  app.addHook('onSend', async (_request, reply, payload) => {
+  app.addHook('onSend', async (request, reply, payload) => {
     reply.header('x-content-type-options', 'nosniff');
     reply.header('x-frame-options', 'DENY');
     reply.header('referrer-policy', 'no-referrer');
     reply.header('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
+    if (request.url.startsWith('/api/')) {
+      const locale = requestLocale(request.headers['accept-language']);
+      reply.header('content-language', locale);
+      reply.header('vary', [reply.getHeader('vary'), 'Accept-Language'].filter(Boolean).join(', '));
+    }
     return payload;
   });
   app.addHook('onRequest', async (request, reply) => {
@@ -386,16 +395,17 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
   const configGroups = new ConfigGroupService(database, config, studioConnections);
   const tickets = new TicketService(database, config, studioConnections);
   const billing = new BillingService(database, config, app.log);
-  const modelUsage = new ModelUsageService(database);
+  const modelUsage = new ModelUsageService(database, config.timeZone);
 
   app.setErrorHandler((error, request, reply) => {
+    const locale = requestLocale(request.headers['accept-language']);
     if (error instanceof ZodError) {
       request.log.warn({
         errorCode: 'VALIDATION_ERROR',
         issueCount: error.issues.length,
         statusCode: 400,
       }, 'request validation failed');
-      void reply.status(400).send({ code: 'VALIDATION_ERROR', message: '请求参数不合法', details: error.issues });
+      void reply.status(400).send({ code: 'VALIDATION_ERROR', messageKey: 'errors.invalidParameters', message: translate('errors.invalidParameters', locale), details: formatValidationIssues(error.issues, locale) });
       return;
     }
     if (error instanceof AppError) {
@@ -409,7 +419,8 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
       else request.log.warn(logContext, 'request rejected');
       void reply.status(error.statusCode).send({
         code: error.code,
-        message: error.message,
+        message: error.localize(locale),
+        ...(error.localizedMessage ? { messageKey: error.localizedMessage.key, messageParams: error.localizedMessage.params } : {}),
         requestId: request.id,
         ...(error.details === undefined ? {} : { data: error.details }),
       });
@@ -421,14 +432,23 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
         errorCode: 'DUPLICATE_RESOURCE',
         statusCode: 409,
       }, 'request rejected by unique constraint');
-      void reply.status(409).send({ code: 'DUPLICATE_RESOURCE', message: '资源已存在' });
+      void reply.status(409).send({ code: 'DUPLICATE_RESOURCE', messageKey: 'errors.resourceExists', message: translate('errors.resourceExists', locale) });
       return;
     }
     request.log.error({
       err: error,
       errorCode: mysqlCode ?? 'UNEXPECTED',
     }, 'unhandled request error');
-    void reply.status(500).send({ code: 'INTERNAL_ERROR', message: '服务内部错误' });
+    void reply.status(500).send({ code: 'INTERNAL_ERROR', messageKey: 'errors.internal', message: translate('errors.internal', locale) });
+  });
+
+  const i18nextRoot = dirname(createRequire(import.meta.url).resolve('i18next/package.json'));
+  const i18nextBrowser = readFileSync(join(i18nextRoot, 'dist/esm/i18next.js'), 'utf8');
+  app.get('/vendor/i18next.js', async (_request, reply) => reply.type('text/javascript').send(i18nextBrowser));
+
+  app.get('/api/runtime-config', async (_request, reply) => {
+    reply.header('cache-control', 'no-store');
+    return { currency: config.STUDIO_LOGIN_CURRENCY, timeZone: config.timeZone, defaultPrices: config.defaultPrices };
   });
 
   app.get('/health', async () => ({ status: 'ok' }));
@@ -535,7 +555,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     const defaultConnection = await studioConnections.get(body.accountId);
     const connectionId = body.connectionId ?? defaultConnection?.connectionId;
     if (!connectionId) {
-      throw new AppError('请先创建 Studio 连接', 409, 'STUDIO_NOT_CONFIGURED');
+      throw new AppError(message('connections.required'), 409, 'STUDIO_NOT_CONFIGURED');
     }
     const created = await configGroups.create({
       ...body,
@@ -553,7 +573,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
   app.get('/api/admin/config-groups', async request => {
     const query = z.object({ accountId: z.string().min(1).max(64) }).parse(request.query);
     await auth.requireAdmin(request, query.accountId);
-    return { items: await configGroups.list(query.accountId) };
+    return { items: await configGroups.list(query.accountId, requestLocale(request.headers['accept-language'])) };
   });
 
   app.get('/api/admin/studio/status', async request => {
@@ -675,7 +695,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     return reply
       .type('text/csv; charset=utf-8')
       .header('content-disposition', 'attachment; filename="studio-subaccounts.csv"')
-      .send('\uFEFFloginName,displayName,password,configGroup,monthlyLimit\nworker,示例用户,password-123,默认配置,100\n');
+      .send(`\uFEFFloginName,displayName,password,configGroup,monthlyLimit\nworker,${translate('csv.exampleUser', requestLocale(request.headers['accept-language']))},password-123,${translate('csv.exampleGroup', requestLocale(request.headers['accept-language']))},100\n`);
   });
 
   app.post('/api/admin/subaccounts/import', async request => {
@@ -696,8 +716,8 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
         configGroupId,
         monthlyLimit: optionalAmount.parse(parsed.monthlyLimit?.trim() || null),
       });
-      return `创建成功: ${result.userId}`;
-    });
+      return message('csv.userCreated', { userId: result.userId });
+    }, requestLocale(request.headers['accept-language']));
   });
 
   app.patch('/api/admin/subaccounts/:userId/status', async request => {
@@ -732,7 +752,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     const body = priceSchema.parse(request.body);
     const actor = await auth.requireAdmin(request, body.accountId);
     if (actor.role !== 'SYSTEM_ADMIN') {
-      throw new AppError('只有系统管理员可以配置价格', 403, 'SYSTEM_ADMIN_REQUIRED');
+      throw new AppError(message('pricing.systemAdminRequired'), 403, 'SYSTEM_ADMIN_REQUIRED');
     }
     await billing.upsertPrice({ ...body, actor });
     return { success: true };
@@ -748,16 +768,16 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     const [catalog, customCatalog, configuredResult, platformResult] = await Promise.all([
       studioConnections.billingCatalog(actor.accountId),
       derivedCustomBillingCatalog(database, config, actor.accountId),
-      billing.listPrices(query.accountId, query.scopeType, query.scopeId) as Promise<{
+      billing.listPrices(query.accountId, query.scopeType, query.scopeId, requestLocale(request.headers['accept-language'])) as Promise<{
         scopeName: string;
         items: Array<Record<string, unknown>>;
       }>,
       query.scopeType === 'CONFIG_GROUP'
-        ? billing.listPrices(query.accountId, 'PLATFORM', '*') as Promise<{
+        ? billing.listPrices(query.accountId, 'PLATFORM', '*', requestLocale(request.headers['accept-language'])) as Promise<{
           scopeName: string;
           items: Array<Record<string, unknown>>;
         }>
-        : Promise.resolve({ scopeName: '平台默认', items: [] }),
+        : Promise.resolve({ scopeName: translate('pricing.platformDefault', requestLocale(request.headers['accept-language'])), items: [] }),
     ]);
     const configured = configuredResult.items;
     const platformPrices = platformResult.items;
@@ -790,8 +810,8 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
         scopeName: null,
         billingItemId: catalogItem.billingItemId,
         unit: catalogItem.unit,
-        customerUnitPrice: '1',
-        costUnitPrice: '0.5',
+        customerUnitPrice: config.defaultPrices.customerUnitPrice,
+        costUnitPrice: config.defaultPrices.costUnitPrice,
         enabled: false,
         configured: false,
         builtinDefault: true,
@@ -864,7 +884,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     }).parse(request.body);
     const actor = await auth.requireAdmin(request, body.accountId);
     if (actor.role !== 'SYSTEM_ADMIN') {
-      throw new AppError('只有系统管理员可以删除价格', 403, 'SYSTEM_ADMIN_REQUIRED');
+      throw new AppError(message('pricing.deleteAdminRequired'), 403, 'SYSTEM_ADMIN_REQUIRED');
     }
     await billing.disablePrice(body);
     return { success: true };
@@ -878,12 +898,12 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     }).parse(request.query);
     const actor = await auth.requireAdmin(request, query.accountId);
     if (actor.role !== 'SYSTEM_ADMIN') {
-      throw new AppError('只有系统管理员可以批量配置价格', 403, 'SYSTEM_ADMIN_REQUIRED');
+      throw new AppError(message('pricing.bulkAdminRequired'), 403, 'SYSTEM_ADMIN_REQUIRED');
     }
     const scopeType = query.scopeType ?? 'PLATFORM';
     const scopeId = query.scopeId ?? '*';
     if (scopeType === 'PLATFORM' && scopeId !== '*') {
-      throw new AppError('平台默认价格的作用范围无效', 400, 'INVALID_PRICE_SCOPE');
+      throw new AppError(message('pricing.invalidPlatformScope'), 400, 'INVALID_PRICE_SCOPE');
     }
     if (scopeType === 'CONFIG_GROUP') {
       await configGroups.resolveAvailableGroupId(actor.accountId, scopeId);
@@ -909,7 +929,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     const rows = [...merged.values()]
       .map(item => {
         const price = configured.get(`${item.billingItemId}\0${item.unit}`);
-        return `${item.billingItemId},${item.unit},${price?.customerUnitPrice ?? '1'},${price?.costUnitPrice ?? '0.5'}`;
+        return `${item.billingItemId},${item.unit},${price?.customerUnitPrice ?? config.defaultPrices.customerUnitPrice},${price?.costUnitPrice ?? config.defaultPrices.costUnitPrice}`;
       })
       .join('\n');
     return reply
@@ -922,10 +942,10 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     const body = priceCsvImportSchema.parse(request.body);
     const actor = await auth.requireAdmin(request, body.accountId);
     if (actor.role !== 'SYSTEM_ADMIN') {
-      throw new AppError('只有系统管理员可以批量配置价格', 403, 'SYSTEM_ADMIN_REQUIRED');
+      throw new AppError(message('pricing.bulkAdminRequired'), 403, 'SYSTEM_ADMIN_REQUIRED');
     }
     if (body.scopeType === 'PLATFORM' && body.scopeId !== '*') {
-      throw new AppError('平台默认价格的作用范围无效', 400, 'INVALID_PRICE_SCOPE');
+      throw new AppError(message('pricing.invalidPlatformScope'), 400, 'INVALID_PRICE_SCOPE');
     }
     if (body.scopeType === 'CONFIG_GROUP') {
       await configGroups.resolveAvailableGroupId(body.accountId, body.scopeId);
@@ -942,7 +962,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     return importCsvRows(rows, async row => {
       const parsed = priceCsvRowSchema.parse(row);
       if (!supported.has(`${parsed.billingItemId}\0${parsed.unit}`)) {
-        return '已跳过：未知计费项';
+        return message('csv.unknownBillingItemSkipped');
       }
       await billing.upsertPrice({
         accountId: body.accountId,
@@ -954,8 +974,8 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
         costUnitPrice: parsed.costUnitPrice,
         actor,
       });
-      return '保存成功';
-    });
+      return message('csv.saved');
+    }, requestLocale(request.headers['accept-language']));
   });
 
   app.get('/api/admin/bills/:period', async request => {
@@ -995,7 +1015,23 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
       pageSize: z.coerce.number().int().min(1).max(100).default(50),
     }).parse(request.query);
     const actor = await auth.requireAdmin(request, query.accountId);
-    return modelUsage.query(query, actor.role === 'SYSTEM_ADMIN');
+    return modelUsage.query(query, actor.role === 'SYSTEM_ADMIN', requestLocale(request.headers['accept-language']));
+  });
+
+  app.get('/api/admin/model-usage/:taskId/audit', async (request, reply) => {
+    const params = z.object({
+      taskId: z.string().min(1).max(64),
+    }).parse(request.params);
+    const query = z.object({
+      accountId: z.string().min(1).max(64),
+    }).parse(request.query);
+    await auth.requireAdmin(request, query.accountId);
+    const document = await modelUsage.auditDocument(query.accountId, params.taskId);
+    const safeTaskId = params.taskId.replaceAll(/[^A-Za-z0-9._-]/g, '_');
+    reply
+      .type('application/json; charset=utf-8')
+      .header('content-disposition', `attachment; filename="billing-audit-${safeTaskId}.json"`);
+    return document;
   });
 
   app.post('/api/studio/tickets/launch', async request => {
@@ -1056,7 +1092,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
       token,
       body.UserId,
     )) {
-      throw new AppError('Studio 鉴权失败', 401, 'STUDIO_UNAUTHORIZED');
+      throw new AppError(message('errors.studioUnauthorized'), 401, 'STUDIO_UNAUTHORIZED');
     }
     await billing.precheck(query.connection_id, appId, body, token);
     return { code: 200, message: 'success', requestId: body.RequestId };
@@ -1084,7 +1120,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
       body.UserId,
       body.RequestId,
     )) {
-      throw new AppError('Studio 鉴权失败', 401, 'STUDIO_UNAUTHORIZED');
+      throw new AppError(message('errors.studioUnauthorized'), 401, 'STUDIO_UNAUTHORIZED');
     }
     await billing.callback(query.connection_id, appId, body);
     return { code: 200, message: 'success', requestId: body.RequestId };

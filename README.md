@@ -47,3 +47,7 @@ npm run dev
 | `npm test` | 运行真实 MySQL 集成测试 |
 
 ## 常见问题
+
+## 币种与账期时区
+
+通过 `STUDIO_LOGIN_CURRENCY=CNY|USD` 设置部署币种，通过部署环境 `TZ` 设置账期与界面时区（未配置或为空时默认 `Asia/Shanghai`，币种未配置时默认 `CNY`）。人民币和美元默认客户单价均为 1、成本单价均为 0.5，可在页面配置具体价格。配置说明和数据边界见 [部署币种与时区](doc/deployment-currency-timezone.md)。

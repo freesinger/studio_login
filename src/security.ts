@@ -1,5 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 
+import { translate } from './i18n.js';
+
 export function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -34,7 +36,7 @@ export function encryptJson(value: unknown, key: Buffer): string {
 
 export function decryptJson<T>(payloadText: string, key: Buffer): T {
   const payload = JSON.parse(payloadText) as EncryptedPayload;
-  if (payload.v !== 1) throw new Error('不支持的配置密文版本');
+  if (payload.v !== 1) throw new Error(translate('security.unsupportedCipherVersion', 'zh-CN'));
   const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(payload.iv, 'base64'));
   decipher.setAuthTag(Buffer.from(payload.tag, 'base64'));
   const clear = Buffer.concat([

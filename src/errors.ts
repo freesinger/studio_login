@@ -1,25 +1,35 @@
+import { formatMessage, message, type Locale, type LocalizedMessage } from './i18n.js';
+
 export class AppError extends Error {
+  readonly localizedMessage: LocalizedMessage | null;
+
   constructor(
-    message: string,
+    description: LocalizedMessage | string,
     readonly statusCode = 400,
     readonly code = 'BAD_REQUEST',
     readonly details?: unknown,
   ) {
-    super(message);
+    super(formatMessage(description, 'zh-CN'));
+    this.localizedMessage = typeof description === 'string' ? null : description;
+  }
+
+  localize(locale: Locale): string {
+    return formatMessage(this.localizedMessage ?? this.message, locale);
   }
 }
 
 export class StudioApiError extends AppError {
   constructor(
-    message: string,
+    description: LocalizedMessage | string,
     readonly upstreamCode: string,
     readonly requestId: string,
     readonly upstreamStatus?: number,
   ) {
-    super(message, 502, 'STUDIO_API_FAILED');
+    super(description, 502, 'STUDIO_API_FAILED');
   }
 }
 
+// Operational logs retain readable canonical text, independently of UI locale.
 export function asErrorMessage(error: unknown): string {
   return error instanceof AppError ? `${error.code}: ${error.message}` : 'unexpected error';
 }
@@ -29,19 +39,13 @@ export function profileSyncError(error: unknown): {
   message: string;
   requestId: string | null;
 } {
-  if (error instanceof StudioApiError) {
+  if (error instanceof AppError) {
     return {
-      code: error.upstreamCode,
+      code: error instanceof StudioApiError ? error.upstreamCode : error.code,
       message: error.message,
-      requestId: error.requestId,
+      requestId: error instanceof StudioApiError ? error.requestId : null,
     };
   }
-  if (error instanceof AppError) {
-    return { code: error.code, message: error.message, requestId: null };
-  }
-  return {
-    code: 'PROFILE_SYNC_FAILED',
-    message: 'Studio Profile 同步失败，请稍后重试',
-    requestId: null,
-  };
+  const description = message('errors.profileSyncFailed');
+  return { code: 'PROFILE_SYNC_FAILED', message: formatMessage(description, 'zh-CN'), requestId: null };
 }

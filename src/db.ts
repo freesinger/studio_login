@@ -5,6 +5,7 @@ import mysql, {
   type RowDataPacket,
 } from 'mysql2/promise';
 
+import { translate } from './i18n.js';
 import type { AppConfig } from './config.js';
 import {
   findDatabaseSchemaIssues,
@@ -40,7 +41,7 @@ function executor(connection: Pool | PoolConnection): DatabaseExecutor {
 export function createDatabase(config: AppConfig): Database {
   const url = new URL(config.STUDIO_LOGIN_DATABASE_URL);
   const databaseName = url.pathname.slice(1);
-  if (!databaseName) throw new Error('STUDIO_LOGIN_DATABASE_URL 必须包含数据库名');
+  if (!databaseName) throw new Error(translate('startup.databaseNameRequired', 'zh-CN'));
 
   const pool = mysql.createPool({
     uri: config.STUDIO_LOGIN_DATABASE_URL.replace(/^mysql2:/, 'mysql:'),
@@ -48,6 +49,14 @@ export function createDatabase(config: AppConfig): Database {
     timezone: '+08:00',
     charset: 'utf8mb4',
     decimalNumbers: false,
+  });
+  // DATETIME values already use +08:00 in this application's driver and retry
+  // timestamps. Keep that storage convention independent of the business TZ.
+  // mysql2 queues this before any query on each newly created connection.
+  pool.pool.on('connection', connection => {
+    connection.query("SET SESSION time_zone = '+08:00'", error => {
+      if (error) connection.destroy();
+    });
   });
   const base = executor(pool);
 

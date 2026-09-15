@@ -1,5 +1,8 @@
+import { TZDate } from '@date-fns/tz';
 import type { RowDataPacket } from 'mysql2/promise';
 
+import { deploymentTimeZone } from './deployment.js';
+import { translate, type Locale, message } from './i18n.js';
 import type { Database } from './db.js';
 import { AppError } from './errors.js';
 
@@ -33,24 +36,33 @@ export interface TokenUsageSummary {
 
 const groupColumns: Record<ModelUsageGroupBy, { id: string; name: string }> = {
   billingItem: { id: 'i.billing_item_id', name: 'i.billing_item_id' },
-  model: { id: "COALESCE(i.model_id, '')", name: "COALESCE(i.model_id, '未上报')" },
+  model: { id: "COALESCE(i.model_id, '')", name: "i.model_id" },
   configGroup: { id: 't.config_group_id', name: 'g.name' },
   subaccount: { id: 't.user_id', name: 'u.display_name' },
   unit: { id: 'i.unit', name: 'i.unit' },
   status: { id: 'i.status', name: 'i.status' },
 };
 
-function dateRange(startDate: string, endDate: string): [Date, Date] {
-  const start = new Date(`${startDate}T00:00:00+08:00`);
-  const end = new Date(`${endDate}T00:00:00+08:00`);
-  if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end < start) {
-    throw new AppError('统计日期范围不合法', 400, 'INVALID_DATE_RANGE');
+export function dateRange(startDate: string, endDate: string, timeZone: string): [Date, Date] {
+  function parseDay(value: string): [number, number, number] {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+    if (!match) throw new AppError(message('modelUsage.invalidDateRange'), 400, 'INVALID_DATE_RANGE');
+    const [year, month, day] = match.slice(1).map(Number) as [number, number, number];
+    const check = new Date(`${value}T00:00:00Z`);
+    if (!Number.isFinite(check.getTime()) || check.toISOString().slice(0, 10) !== value || year < 100) {
+      throw new AppError(message('modelUsage.invalidDateRange'), 400, 'INVALID_DATE_RANGE');
+    }
+    return [year, month - 1, day];
   }
-  const exclusiveEnd = new Date(end.getTime() + 86_400_000);
-  if (exclusiveEnd.getTime() - start.getTime() > 90 * 86_400_000) {
-    throw new AppError('统计日期范围不能超过 90 天', 400, 'DATE_RANGE_TOO_LARGE');
-  }
-  return [start, exclusiveEnd];
+  const startParts = parseDay(startDate);
+  const endParts = parseDay(endDate);
+  const days = (Date.UTC(...endParts) - Date.UTC(...startParts)) / 86_400_000 + 1;
+  if (days <= 0) throw new AppError(message('modelUsage.invalidDateRange'), 400, 'INVALID_DATE_RANGE');
+  if (days > 90) throw new AppError(message('modelUsage.dateRangeTooLarge'), 400, 'DATE_RANGE_TOO_LARGE');
+  const start = new TZDate(...startParts, timeZone);
+  const end = new TZDate(endParts[0], endParts[1], endParts[2] + 1, timeZone);
+  // Return ordinary Dates: the database driver controls storage representation.
+  return [new Date(start.getTime()), new Date(end.getTime())];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -76,6 +88,17 @@ function firstNumberField(
 
 function parseBillingContext(value: unknown): Record<string, unknown> | null {
   if (!value) return null;
+  if (isRecord(value)) return value;
+  if (typeof value !== 'string') return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseJsonObject(value: unknown): Record<string, unknown> | null {
   if (isRecord(value)) return value;
   if (typeof value !== 'string') return null;
   try {
@@ -121,10 +144,10 @@ function withUsageContext(row: RowDataPacket): RowDataPacket {
 }
 
 export class ModelUsageService {
-  constructor(private readonly database: Database) {}
+  constructor(private readonly database: Database, private readonly timeZone = deploymentTimeZone()) {}
 
-  async query(input: ModelUsageQuery, includeCost: boolean): Promise<unknown> {
-    const [start, end] = dateRange(input.startDate, input.endDate);
+  async query(input: ModelUsageQuery, includeCost: boolean, locale: Locale = 'zh-CN'): Promise<unknown> {
+    const [start, end] = dateRange(input.startDate, input.endDate, this.timeZone);
     const where = [
       'r.account_id = ?',
       't.created_at >= ?',
@@ -205,6 +228,11 @@ export class ModelUsageService {
           LIMIT ? OFFSET ?`,
         [...params, input.pageSize, offset],
       );
+      if (input.groupBy === 'model') {
+        items = items.map(item => item.dimensionName === null
+          ? { ...item, dimensionName: translate('modelUsage.notReported', locale) } as RowDataPacket
+          : item);
+      }
     } else {
       const countRows = await this.database.query<CountRow>(`SELECT COUNT(*) AS total ${from}`, params);
       total = Number(countRows[0]?.total ?? 0);
@@ -213,11 +241,12 @@ export class ModelUsageService {
                 t.finished_at AS finishedAt, i.billing_item_id AS billingItemId,
                 i.model_id AS modelId, i.unit, i.estimated_usage AS estimatedUsage,
                 i.actual_usage AS actualUsage, i.status,
-                TIMESTAMPDIFF(MINUTE, t.created_at, COALESCE(t.finished_at, UTC_TIMESTAMP())) AS runningMinutes,
+                TIMESTAMPDIFF(MINUTE, t.created_at, COALESCE(t.finished_at, CURRENT_TIMESTAMP())) AS runningMinutes,
                 t.last_reconcile_at AS lastReconcileAt,
                 t.last_reconcile_status AS lastReconcileStatus,
                 t.reconcile_attempts AS reconcileAttempts,
                 t.next_reconcile_at AS nextReconcileAt,
+                (t.billing_audit_payload IS NOT NULL) AS hasAuditPayload,
                 i.estimated_billing_context AS estimatedBillingContext,
                 i.actual_billing_context AS actualBillingContext,
                 (${usageExpression} * i.customer_unit_price) AS customerAmount,
@@ -244,6 +273,41 @@ export class ModelUsageService {
       totals: hideCost(totals),
       usageByUnit,
       items: items.map(withUsageContext).map(hideCost),
+    };
+  }
+
+  async auditDocument(accountId: string, taskId: string): Promise<unknown> {
+    const rows = await this.database.query<RowDataPacket>(
+      `SELECT t.task_id AS taskId, t.request_id AS requestId,
+              t.status, t.created_at AS createdAt, t.finished_at AS finishedAt,
+              t.billing_audit_payload AS billingAuditPayload,
+              t.config_group_id AS configGroupId, g.name AS configGroupName,
+              t.user_id AS userId, u.login_name AS loginName, u.display_name AS displayName
+         FROM studio_tasks t
+         JOIN studio_registrations r ON r.connection_id = t.connection_id
+         JOIN config_groups g ON g.config_group_id = t.config_group_id
+         JOIN users u ON u.user_id = t.user_id
+        WHERE r.account_id = ? AND t.task_id = ?
+        LIMIT 1`,
+      [accountId, taskId],
+    );
+    const row = rows[0] as Record<string, unknown> | undefined;
+    if (!row) {
+      throw new AppError(message('modelUsage.auditNotFound'), 404, 'BILLING_AUDIT_NOT_FOUND');
+    }
+    const audit = parseJsonObject(row.billingAuditPayload);
+    if (!audit) {
+      throw new AppError(
+        message('modelUsage.auditNotAvailable'),
+        404,
+        'BILLING_AUDIT_NOT_AVAILABLE',
+      );
+    }
+    const { billingAuditPayload: _billingAuditPayload, ...task } = row;
+    return {
+      exportedAt: new Date().toISOString(),
+      task,
+      audit,
     };
   }
 }

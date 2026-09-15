@@ -1,3 +1,5 @@
+import { message } from './i18n.js';
+import type { LocalizedMessage } from './i18n.js';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 
 import type { RowDataPacket } from 'mysql2/promise';
@@ -59,22 +61,22 @@ type ReadyConnectionRow = ConnectionRow & {
   integration_token_cipher: string;
 };
 
-function normalizeBaseUrl(value: string, field: string, production: boolean): string {
+function normalizeBaseUrl(value: string, field: string | LocalizedMessage, production: boolean): string {
   let parsed: URL;
   try {
     parsed = new URL(value.trim());
   } catch {
-    throw new AppError(`${field} 不是合法 URL`, 400, 'INVALID_STUDIO_URL');
+    throw new AppError(message('connections.invalidUrl', { field: field }), 400, 'INVALID_STUDIO_URL');
   }
   if (!['http:', 'https:'].includes(parsed.protocol)
       || parsed.username || parsed.password || parsed.hash || parsed.search) {
-    throw new AppError(`${field} 必须是 HTTP(S) 基础地址且不能包含认证信息、查询或片段`, 400, 'INVALID_STUDIO_URL');
+    throw new AppError(message('connections.invalidBaseUrl', { field: field }), 400, 'INVALID_STUDIO_URL');
   }
   if (production && parsed.protocol !== 'https:') {
-    throw new AppError(`${field} 在生产环境必须使用 HTTPS`, 400, 'INVALID_STUDIO_URL');
+    throw new AppError(message('connections.httpsRequired', { field: field }), 400, 'INVALID_STUDIO_URL');
   }
   if (production && isPrivateHost(parsed.hostname)) {
-    throw new AppError(`${field} 在生产环境不能使用本地或私网地址`, 400, 'INVALID_STUDIO_URL');
+    throw new AppError(message('connections.publicUrlRequired', { field: field }), 400, 'INVALID_STUDIO_URL');
   }
   return parsed.toString().replace(/\/$/, '');
 }
@@ -155,17 +157,17 @@ export class StudioConnectionService {
     actor: Actor;
   }): Promise<StudioConnectionView> {
     const production = this.config.APP_ENV === 'production';
-    const studioBaseUrl = normalizeBaseUrl(input.studioBaseUrl, 'Studio 访问地址', production);
-    const callbackBaseUrl = normalizeBaseUrl(input.callbackBaseUrl, '回调地址', production);
+    const studioBaseUrl = normalizeBaseUrl(input.studioBaseUrl, message('connections.studioUrlLabel'), production);
+    const callbackBaseUrl = normalizeBaseUrl(input.callbackBaseUrl, message('connections.callbackUrlLabel'), production);
     const existing = await this.findDefaultByAccountId(input.accountId);
     const appId = this.config.STUDIO_LOGIN_ACCOUNT_ID;
     const connectionId = existing?.connection_id ?? input.accountId;
     const token = (input.integrationToken ?? this.config.LAS_STUDIO_INTEGRATION_TOKEN).trim();
     if (!existing?.integration_token_cipher && !token) {
-      throw new AppError('首次配置必须填写 Integration Token', 400, 'INTEGRATION_TOKEN_REQUIRED');
+      throw new AppError(message('connections.tokenRequired'), 400, 'INTEGRATION_TOKEN_REQUIRED');
     }
     if (token && token.length < 32) {
-      throw new AppError('Integration Token 至少需要 32 个字符', 400, 'INTEGRATION_TOKEN_TOO_SHORT');
+      throw new AppError(message('connections.tokenTooShort'), 400, 'INTEGRATION_TOKEN_TOO_SHORT');
     }
 
     const ticketUrl = callbackUrl(
@@ -214,7 +216,7 @@ export class StudioConnectionService {
       );
     });
     const saved = await this.findDefaultByAccountId(input.accountId);
-    if (!saved) throw new AppError('Studio 配置保存失败', 500, 'STUDIO_CONFIG_SAVE_FAILED');
+    if (!saved) throw new AppError(message('connections.saveFailed'), 500, 'STUDIO_CONFIG_SAVE_FAILED');
     return this.toView(saved);
   }
 
@@ -265,13 +267,13 @@ export class StudioConnectionService {
     actor: Actor;
   }): Promise<void> {
     const production = this.config.APP_ENV === 'production';
-    const studioBaseUrl = normalizeBaseUrl(input.studioBaseUrl, 'Studio 访问地址', production);
-    const callbackBaseUrl = normalizeBaseUrl(input.callbackBaseUrl, '回调地址', production);
+    const studioBaseUrl = normalizeBaseUrl(input.studioBaseUrl, message('connections.studioUrlLabel'), production);
+    const callbackBaseUrl = normalizeBaseUrl(input.callbackBaseUrl, message('connections.callbackUrlLabel'), production);
     const existing = await this.findById(input.accountId, input.connectionId);
     const appId = this.config.STUDIO_LOGIN_ACCOUNT_ID;
     const name = input.name.trim();
     if (!name) {
-      throw new AppError('连接名称不能为空', 400, 'CONNECTION_NAME_REQUIRED');
+      throw new AppError(message('connections.nameRequired'), 400, 'CONNECTION_NAME_REQUIRED');
     }
     const ticketUrl = callbackUrl(
       callbackBaseUrl,
@@ -307,7 +309,7 @@ export class StudioConnectionService {
           [name, input.isDefault, ...values.slice(1), input.accountId, input.connectionId],
         );
         if (result.affectedRows !== 1) {
-          throw new AppError('Studio 连接不存在', 404, 'STUDIO_CONNECTION_NOT_FOUND');
+          throw new AppError(message('connections.notFound'), 404, 'STUDIO_CONNECTION_NOT_FOUND');
         }
         return;
       }
@@ -336,7 +338,7 @@ export class StudioConnectionService {
     idempotent: boolean;
   }> {
     const row = await this.findDefaultByAccountId(accountId);
-    if (!row) throw new AppError('Studio 连接不存在', 404, 'STUDIO_CONNECTION_NOT_FOUND');
+    if (!row) throw new AppError(message('connections.notFound'), 404, 'STUDIO_CONNECTION_NOT_FOUND');
     return this.registerById(accountId, row.connection_id, actor);
   }
 
@@ -353,10 +355,10 @@ export class StudioConnectionService {
       );
       const row = rows[0];
       if (!row?.studio_base_url || !row.callback_base_url || !row.integration_token_cipher) {
-        throw new AppError('请先保存公网接入地址和 Integration Token', 409, 'STUDIO_NOT_CONFIGURED');
+        throw new AppError(message('connections.setupRequired'), 409, 'STUDIO_NOT_CONFIGURED');
       }
       if (row.status === 'PENDING') {
-        throw new AppError('Studio 注册正在处理中', 409, 'REGISTRATION_IN_PROGRESS');
+        throw new AppError(message('connections.registrationInProgress'), 409, 'REGISTRATION_IN_PROGRESS');
       }
       await tx.execute(
         "UPDATE studio_registrations SET status = 'PENDING', registered_by = ?, last_error = NULL WHERE connection_id = ?",
@@ -496,7 +498,7 @@ export class StudioConnectionService {
       }
     }
     if (rows.length > 0 && merged.size === 0) {
-      throw new AppError('暂时无法从 Studio 获取计费项', 502, 'STUDIO_BILLING_CATALOG_UNAVAILABLE');
+      throw new AppError(message('studio.billingCatalogUnavailable'), 502, 'STUDIO_BILLING_CATALOG_UNAVAILABLE');
     }
     return [...merged.values()].sort((left, right) =>
       left.billingItemId.localeCompare(right.billingItemId) || left.unit.localeCompare(right.unit));
@@ -505,7 +507,7 @@ export class StudioConnectionService {
   async assertBillingCatalogItem(accountId: string, billingItemId: string, unit: string): Promise<void> {
     const catalog = await this.billingCatalog(accountId);
     if (!catalog.some(item => item.billingItemId === billingItemId && item.unit === unit)) {
-      throw new AppError('计费项或单位不在 Studio 支持目录中', 400, 'BILLING_ITEM_NOT_SUPPORTED');
+      throw new AppError(message('studio.billingItemUnsupported'), 400, 'BILLING_ITEM_NOT_SUPPORTED');
     }
   }
 
@@ -522,7 +524,7 @@ export class StudioConnectionService {
     for (const item of items) {
       if (!supported.has(`${item.BillingItemId}\u0000${item.Unit}`)) {
         throw new AppError(
-          `Studio 不支持计费项: ${item.BillingItemId}/${item.Unit}`,
+          message('studio.unsupportedBillingItem', { billingItemId: item.BillingItemId, unit: item.Unit }),
           400,
           'BILLING_ITEM_NOT_SUPPORTED',
         );
@@ -533,7 +535,7 @@ export class StudioConnectionService {
   async registerUsageEndpoint(accountId: string, connectionId: string, lasApiKey: string): Promise<void> {
     const normalizedApiKey = lasApiKey.trim();
     if (!normalizedApiKey) {
-      throw new AppError('LAS API Key 不能为空', 400, 'LAS_API_KEY_REQUIRED');
+      throw new AppError(message('groups.lasKeyRequired'), 400, 'LAS_API_KEY_REQUIRED');
     }
     const row = await this.requireReadyRowById(accountId, connectionId);
     await this.registerUsageEndpointForRow(this.connectionFromRow(row), row, normalizedApiKey);
@@ -566,7 +568,7 @@ export class StudioConnectionService {
     const row = await this.requireReadyRowByAppId(appId, connectionId);
     const lasApiKey = await this.resourceLasApiKeyForTask(connectionId, appId, userId, requestId);
     if (!lasApiKey) {
-      throw new AppError('Studio 用量查询 LAS API Key 未就绪', 409, 'STUDIO_USAGE_QUERY_NOT_READY');
+      throw new AppError(message('studio.usageKeyNotReady'), 409, 'STUDIO_USAGE_QUERY_NOT_READY');
     }
     return {
       studioBaseUrl: row.studio_base_url,
@@ -581,7 +583,7 @@ export class StudioConnectionService {
   }> {
     const row = await this.findById(accountId, connectionId);
     if (!row?.studio_base_url || row.status !== 'READY') {
-      throw new AppError('Studio 配置未就绪', 409, 'STUDIO_LOGIN_NOT_READY');
+      throw new AppError(message('studio.notReady'), 409, 'STUDIO_LOGIN_NOT_READY');
     }
     return { studioBaseUrl: row.studio_base_url, appId: row.app_id };
   }
@@ -598,7 +600,7 @@ export class StudioConnectionService {
   async delete(accountId: string, connectionId: string): Promise<{ status: string }> {
     const row = await this.findById(accountId, connectionId);
     if (!row) {
-      throw new AppError('Studio 连接不存在', 404, 'STUDIO_CONNECTION_NOT_FOUND');
+      throw new AppError(message('connections.notFound'), 404, 'STUDIO_CONNECTION_NOT_FOUND');
     }
     if (row.status === 'DELETED') return { status: 'DELETED' };
     const refs = await this.database.query<{ count: number } & RowDataPacket>(
@@ -607,7 +609,7 @@ export class StudioConnectionService {
       [connectionId],
     );
     if (Number(refs[0]?.count) > 0) {
-      throw new AppError('连接仍被非删除配置组引用', 409, 'STUDIO_CONNECTION_IN_USE');
+      throw new AppError(message('connections.inUse'), 409, 'STUDIO_CONNECTION_IN_USE');
     }
     try {
       const sibling = row.studio_base_url
@@ -653,10 +655,10 @@ export class StudioConnectionService {
   private async requireReadyRow(accountId: string): Promise<ReadyConnectionRow> {
     const row = await this.findDefaultByAccountId(accountId);
     if (!row || row.status !== 'READY') {
-      throw new AppError('请先完成 Studio 注册', 409, 'STUDIO_NOT_REGISTERED');
+      throw new AppError(message('connections.registrationRequired'), 409, 'STUDIO_NOT_REGISTERED');
     }
     if (!row.studio_base_url || !row.integration_token_cipher) {
-      throw new AppError('Studio 连接配置不完整', 409, 'STUDIO_NOT_CONFIGURED');
+      throw new AppError(message('connections.incomplete'), 409, 'STUDIO_NOT_CONFIGURED');
     }
     return row as ReadyConnectionRow;
   }
@@ -667,10 +669,10 @@ export class StudioConnectionService {
   ): Promise<ReadyConnectionRow> {
     const row = await this.findById(accountId, connectionId);
     if (!row || row.status !== 'READY') {
-      throw new AppError('请先完成 Studio 注册', 409, 'STUDIO_NOT_REGISTERED');
+      throw new AppError(message('connections.registrationRequired'), 409, 'STUDIO_NOT_REGISTERED');
     }
     if (!row.studio_base_url || !row.integration_token_cipher) {
-      throw new AppError('Studio 连接配置不完整', 409, 'STUDIO_NOT_CONFIGURED');
+      throw new AppError(message('connections.incomplete'), 409, 'STUDIO_NOT_CONFIGURED');
     }
     return row as ReadyConnectionRow;
   }
@@ -686,7 +688,7 @@ export class StudioConnectionService {
     );
     const row = rows[0];
     if (!row || row.status !== 'READY' || !row.studio_base_url || !row.integration_token_cipher) {
-      throw new AppError('Studio 用量查询连接未就绪', 409, 'STUDIO_USAGE_QUERY_NOT_READY');
+      throw new AppError(message('studio.usageConnectionNotReady'), 409, 'STUDIO_USAGE_QUERY_NOT_READY');
     }
     return row as ReadyConnectionRow;
   }
@@ -721,7 +723,7 @@ export class StudioConnectionService {
     const items = await this.studioClient.getBillingCatalog(this.connectionFromRow(row), row.app_id);
     await this.database.execute(
       `UPDATE studio_registrations
-          SET billing_catalog_json = ?, billing_catalog_synced_at = UTC_TIMESTAMP(3),
+          SET billing_catalog_json = ?, billing_catalog_synced_at = CURRENT_TIMESTAMP(3),
               billing_catalog_error = NULL
         WHERE connection_id = ?`,
       [JSON.stringify(items), row.connection_id],
@@ -817,7 +819,7 @@ export class StudioConnectionService {
 
   private connectionFromRow(row: ConnectionRow): StudioConnection {
     if (!row.studio_base_url || !row.integration_token_cipher) {
-      throw new AppError('Studio 连接配置不完整', 409, 'STUDIO_NOT_CONFIGURED');
+      throw new AppError(message('connections.incomplete'), 409, 'STUDIO_NOT_CONFIGURED');
     }
     return {
       studioBaseUrl: row.studio_base_url,
@@ -864,7 +866,7 @@ export class StudioConnectionService {
     );
     if (rows[0]) {
       throw new AppError(
-        `Studio 实例已由连接「${rows[0].name}」注册，请直接编辑现有连接`,
+        message('connections.instanceAlreadyRegistered', { name: rows[0].name }),
         409,
         'STUDIO_INSTANCE_ALREADY_REGISTERED',
       );
@@ -888,7 +890,7 @@ export class StudioConnectionService {
 
   private async requireView(accountId: string, connectionId: string): Promise<StudioConnectionView> {
     const row = await this.findById(accountId, connectionId);
-    if (!row) throw new AppError('Studio 连接不存在', 404, 'STUDIO_CONNECTION_NOT_FOUND');
+    if (!row) throw new AppError(message('connections.notFound'), 404, 'STUDIO_CONNECTION_NOT_FOUND');
     return this.toView(row);
   }
 
