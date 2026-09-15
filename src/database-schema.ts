@@ -1,3 +1,5 @@
+import { translate } from './i18n.js';
+
 export const requiredDatabaseColumns = {
   schema_migrations: ['version', 'applied_at'],
   system_state: ['id', 'initialized'],
@@ -61,6 +63,7 @@ export const requiredDatabaseColumns = {
     'user_id',
     'request_id',
     'status',
+    'billing_audit_payload',
     'last_reconcile_at',
     'last_reconcile_status',
     'last_reconcile_error',
@@ -103,12 +106,12 @@ export function findDatabaseSchemaIssues(columns: readonly DatabaseColumnInfo[])
   for (const [tableName, requiredColumns] of Object.entries(requiredDatabaseColumns)) {
     const actualColumns = actual.get(tableName);
     if (!actualColumns) {
-      issues.push(`${tableName} 表不存在`);
+      issues.push(translate('startup.tableMissing', 'zh-CN', { table: tableName }));
       continue;
     }
     const missingColumns = requiredColumns.filter(column => !actualColumns.has(column));
     if (missingColumns.length > 0) {
-      issues.push(`${tableName} 缺少列 ${missingColumns.join(', ')}`);
+      issues.push(translate('startup.columnsMissing', 'zh-CN', { table: tableName, columns: missingColumns.join(', ') }));
     }
   }
   return issues;
@@ -116,6 +119,6 @@ export function findDatabaseSchemaIssues(columns: readonly DatabaseColumnInfo[])
 
 export function incompatibleSchemaError(issues: readonly string[]): Error {
   return new Error(
-    `MySQL 表结构与 studio-login 不兼容，请使用独立数据库。${issues.join('；')}`,
+    translate('startup.incompatibleSchema', 'zh-CN', { details: issues.join('；') }),
   );
 }

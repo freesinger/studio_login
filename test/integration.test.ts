@@ -9,6 +9,7 @@ import { BillingService } from '../src/billing.js';
 import { bootstrapApplication } from '../src/bootstrap.js';
 import { loadConfig, type AppConfig } from '../src/config.js';
 import { createDatabase, type Database } from '../src/db.js';
+import { currentBillingPeriod } from '../src/quota.js';
 import { StudioAdminClient } from '../src/studio-client.js';
 import { StudioConnectionService } from '../src/studio-connections.js';
 
@@ -156,6 +157,115 @@ afterAll(async () => {
 });
 
 describe('studio-login MVP', () => {
+  it('keeps Date round trips, database clocks and session expiry consistent', async () => {
+    await database.transaction(async tx => {
+      await tx.execute('CREATE TEMPORARY TABLE clock_probe (created_at DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3), bound_at DATETIME(3))');
+      try {
+        const instant = new Date();
+        await tx.execute('INSERT INTO clock_probe (bound_at) VALUES (?)', [instant]);
+        const row = (await tx.query<any>('SELECT created_at, bound_at, TIMESTAMPDIFF(SECOND, bound_at, CURRENT_TIMESTAMP(3)) AS elapsed, @@session.time_zone AS zone FROM clock_probe'))[0];
+        expect(row.zone).toBe('+08:00');
+        expect(row.bound_at.toISOString()).toBe(instant.toISOString());
+        expect(Math.abs(row.created_at.getTime() - instant.getTime())).toBeLessThan(2000);
+        expect(Math.abs(Number(row.elapsed))).toBeLessThan(2);
+      } finally { await tx.execute('DROP TEMPORARY TABLE clock_probe'); }
+    });
+    const cookie = await login('acc_demo', 'root', 'password-123');
+    expect((await app.inject({ url: '/api/auth/me', headers: { cookie } })).statusCode).toBe(200);
+    await database.execute('UPDATE sessions SET expires_at = ?', [new Date(Date.now() - 1000)]);
+    expect((await app.inject({ url: '/api/auth/me', headers: { cookie } })).statusCode).toBe(401);
+  });
+
+  it.each(['CNY', 'USD'] as const)('keeps %s defaults, overrides, snapshots and callback periods consistent', async currency => {
+    const defaultPrices = { customerUnitPrice: '1', costUnitPrice: '0.5' };
+    const deployment = { ...config, STUDIO_LOGIN_CURRENCY: currency, timeZone: 'America/Los_Angeles', defaultPrices };
+    const variant = await buildApp({ config: deployment, database });
+    try {
+      const cookie = await login('acc_demo', 'root', 'password-123');
+      expect((await configureStudio(cookie)).statusCode).toBe(200);
+      const group = await app.inject({ method: 'POST', url: '/api/admin/config-groups', headers: { cookie }, payload: {
+        accountId: 'acc_demo', name: 'Money test', monthlyLimit: '1000', isDefault: true,
+        resourceConfig: { lasApiKey: 'test-las', arkApiKey: 'test-ark', tosBucketName: 'test-bucket' },
+      } });
+      expect(group.statusCode, group.body).toBe(200);
+      const configGroupId = group.json().configGroupId;
+      const user = await app.inject({ method: 'POST', url: '/api/admin/subaccounts', headers: { cookie }, payload: {
+        accountId: 'acc_demo', loginName: 'money-worker', displayName: 'Money worker', password: 'password-123', configGroupId, monthlyLimit: '100',
+      } });
+      expect(user.statusCode, user.body).toBe(200);
+      const userCookie = await login('acc_demo', 'money-worker', 'password-123');
+      const launchTicket = async () => {
+        const response = await variant.inject({ method: 'POST', url: '/api/studio/tickets/launch', headers: { cookie: userCookie } });
+        expect(response.statusCode, response.body).toBe(200);
+        return new URL(response.json().launchUrl).searchParams.get('ticket');
+      };
+      const verifyTicket = (ticket: string | null) => variant.inject({ method: 'POST', url: '/api/internal/studio/tickets/verify?app_id=acc_demo&connection_id=acc_demo', payload: { bllFields: { ticket } } });
+      const liveTicket = await launchTicket();
+      expect((await verifyTicket(liveTicket)).statusCode).toBe(200);
+      expect((await verifyTicket(liveTicket)).statusCode).toBe(401);
+      const expiredTicket = await launchTicket();
+      await database.execute('UPDATE studio_login_tickets SET expires_at = ?', [new Date(Date.now() - 1000)]);
+      expect((await verifyTicket(expiredTicket)).statusCode).toBe(401);
+
+      const list = await variant.inject({ url: '/api/admin/prices?accountId=acc_demo&scopeType=PLATFORM&scopeId=*', headers: { cookie } });
+      expect(list.statusCode, list.body).toBe(200);
+      expect(list.json().items.find((item: any) => item.billingItemId === 'image')).toMatchObject(defaultPrices);
+      const csv = await variant.inject({ url: '/api/admin/prices/import-template?accountId=acc_demo', headers: { cookie } });
+      expect(csv.body).toContain(`image,count,${defaultPrices.customerUnitPrice},${defaultPrices.costUnitPrice}`);
+      const headers = { 'x-app-id': 'acc_demo', 'x-las-api-key': 'test-las' };
+      const precheck = (requestId: string) => variant.inject({ method: 'POST', url: '/api/studio/baseline/tasks?connection_id=acc_demo', headers, payload: {
+        RequestId: requestId, UserId: 'money-worker', Items: [{ BillingItemId: 'image', Unit: 'count', Usage: 2 }],
+      } });
+      expect((await precheck('default-price')).statusCode).toBe(200);
+      const stored = (await database.query<any>("SELECT billing_period FROM studio_tasks WHERE request_id = 'default-price'"))[0];
+      expect(stored.billing_period).toBe(currentBillingPeriod(new Date(), deployment.timeZone));
+      const savePrice = (scopeType: string, scopeId: string, price: string) => variant.inject({ method: 'POST', url: '/api/admin/prices', headers: { cookie }, payload: {
+        accountId: 'acc_demo', scopeType, scopeId, billingItemId: 'image', unit: 'count', customerUnitPrice: price, costUnitPrice: '0', enabled: true,
+      } });
+      expect((await savePrice('PLATFORM', '*', '0.25')).statusCode).toBe(200);
+      // A callback must settle the original month, even after the current month/price changes.
+      await database.execute("UPDATE studio_tasks SET billing_period = '2020-01' WHERE request_id = 'default-price'");
+      await database.execute("UPDATE period_usage SET billing_period = '2020-01'");
+      const callback = await variant.inject({ method: 'POST', url: '/api/studio/baseline/tasks/callback?connection_id=acc_demo', headers, payload: {
+        RequestId: 'default-price', UserId: 'money-worker', Status: 'SUCCEEDED', Items: [{ BillingItemId: 'image', Unit: 'count', Usage: 3 }],
+      } });
+      expect(callback.statusCode, callback.body).toBe(200);
+      const settled = (await database.query<any>("SELECT actual_amount, actual_cost FROM studio_tasks WHERE request_id = 'default-price'"))[0];
+      expect(Number(settled.actual_amount)).toBe(Number(defaultPrices.customerUnitPrice) * 3);
+      expect(Number(settled.actual_cost)).toBe(Number(defaultPrices.costUnitPrice) * 3);
+      const usage = await database.query<any>("SELECT billing_period, actual_amount, reserved_amount FROM period_usage");
+      expect(usage.length).toBeGreaterThan(0);
+      for (const row of usage) {
+        expect(row.billing_period).toBe('2020-01');
+        expect(Number(row.actual_amount)).toBe(Number(defaultPrices.customerUnitPrice) * 3);
+        expect(Number(row.reserved_amount)).toBe(0);
+      }
+      expect((await precheck('platform-price')).statusCode).toBe(200);
+      expect((await savePrice('CONFIG_GROUP', configGroupId, '0.375')).statusCode).toBe(200);
+      expect((await precheck('group-price')).statusCode).toBe(200);
+      const snapshots = await database.query<any>('SELECT t.request_id, i.customer_unit_price FROM studio_task_items i JOIN studio_tasks t ON t.task_id = i.task_id');
+      expect(Object.fromEntries(snapshots.map(row => [row.request_id, Number(row.customer_unit_price)]))).toEqual({
+        'default-price': Number(defaultPrices.customerUnitPrice), 'platform-price': 0.25, 'group-price': 0.375,
+      });
+      const reconciler = new BillingReconciler(database, new StudioConnectionService(database, deployment, new StudioAdminClient()), new BillingService(database, deployment));
+      await database.execute("UPDATE studio_tasks SET created_at = ?, next_reconcile_at = ? WHERE status = 'RUNNING'", [new Date(Date.now() - 20 * 60_000), new Date(Date.now() + 60_000)]);
+      expect((await reconciler.reconcile({ olderThanMinutes: 10, limit: 10 })).scanned).toBe(0);
+      await database.execute("UPDATE studio_tasks SET next_reconcile_at = ? WHERE request_id = 'platform-price'", [new Date(Date.now() - 1000)]);
+      expect((await reconciler.reconcile({ olderThanMinutes: 10, limit: 10 })).scanned).toBe(1);
+      const retried = (await database.query<any>("SELECT last_reconcile_at, next_reconcile_at, reconcile_attempts FROM studio_tasks WHERE request_id = 'platform-price'"))[0];
+      expect(Math.abs(retried.last_reconcile_at.getTime() - Date.now())).toBeLessThan(3000);
+      expect(retried.next_reconcile_at.getTime()).toBeGreaterThan(Date.now());
+      expect(retried.reconcile_attempts).toBe(1);
+      // The same instant belongs to different calendar days in Shanghai and LA.
+      await database.execute("UPDATE studio_tasks SET created_at = ?", [new Date('2026-09-01T06:59:59Z')]);
+      await database.execute("UPDATE studio_tasks SET created_at = ? WHERE request_id = 'group-price'", [new Date('2026-09-01T07:00:00Z')]);
+      const usageResponse = await variant.inject({ url: '/api/admin/model-usage?accountId=acc_demo&startDate=2026-09-01&endDate=2026-09-01&mode=detail&groupBy=model&page=1&pageSize=50', headers: { cookie } });
+      expect(usageResponse.statusCode, usageResponse.body).toBe(200);
+      expect(usageResponse.json().items.map((item: any) => item.requestId)).toEqual(['group-price']);
+      expect(usageResponse.json().items[0].createdAt).toBe('2026-09-01T07:00:00.000Z');
+    } finally { await variant.close(); }
+  });
+
   it('页面提供登录、管理工作台和运行时连接配置入口', async () => {
     const page = await app.inject({ method: 'GET', url: '/' });
     expect(page.statusCode).toBe(200);
@@ -320,6 +430,24 @@ describe('studio-login MVP', () => {
     expect(mergedGroupList.body).toContain('ark-secret-next');
     expect(mergedGroupList.json().items[0].projectLevelSharing).toBe(true);
 
+    const disabledSharing = await app.inject({
+      method: 'PUT',
+      url: `/api/admin/config-groups/${configGroupId}`,
+      headers: { cookie: adminCookie },
+      payload: {
+        accountId: 'acc_demo',
+        resourceConfig: {},
+        monthlyLimit: '1200',
+        projectLevelSharing: false,
+      },
+    });
+    expect(disabledSharing.statusCode).toBe(409);
+    expect(disabledSharing.json()).toMatchObject({
+      code: 'PROJECT_LEVEL_SHARING_IMMUTABLE',
+      message: '数据共享开启后不能关闭，以避免已有资源归属发生变化',
+    });
+
+    studioRequestBodies.length = 0;
     const subaccount = await app.inject({
       method: 'POST',
       url: '/api/admin/subaccounts',
@@ -335,24 +463,19 @@ describe('studio-login MVP', () => {
     });
     expect(subaccount.statusCode).toBe(200);
     const subaccountId = subaccount.json().userId as string;
-    expect(studioCalls).toContain('/integration/api/v1/user-profiles/upsert');
-    expect(studioRequestBodies).toContainEqual({
-      path: '/integration/api/v1/user-profiles/upsert',
-      body: expect.objectContaining({
-        appId: 'acc_demo',
-        projectId: 'acc_demo',
-        userId: 'worker',
-        projectLevelSharing: true,
-        lasBaseUrl: 'https://las.example.com',
-        tosBucketName: 'studio-login-test',
-        tosAccessKey: 'tos-access-secret',
-        tosSecretKey: 'tos-secret',
-        tosUploadPrefix: 'uploads/',
-        tosEndpoint: 'https://tos.example.com',
-        outputTosPath: 'tos://studio-login-test/output/',
-        customModels: [{ name: 'custom-model', type: 'IMAGE' }],
-      }),
+    const workerProfileRequests = studioRequestBodies.filter(request =>
+      request.path === '/integration/api/v1/user-profiles/upsert'
+      && request.body.userId === 'worker');
+    expect(workerProfileRequests).toHaveLength(1);
+    expect(workerProfileRequests[0]?.body).toMatchObject({
+      appId: 'acc_demo',
+      projectId: 'acc_demo',
+      userId: 'worker',
+      projectLevelSharing: true,
     });
+    expect(studioRequestBodies.filter(request =>
+      request.path === '/integration/api/v1/user-profiles/upsert'
+      && !request.body.userId)).toHaveLength(0);
 
     const users = await app.inject({
       method: 'GET',
@@ -382,14 +505,8 @@ describe('studio-login MVP', () => {
       },
     });
     expect(updatedUser.statusCode).toBe(200);
-    expect(studioRequestBodies).toContainEqual({
-      path: '/integration/api/v1/user-profiles/upsert',
-      body: expect.objectContaining({
-        projectId: 'acc_demo',
-        userId: 'worker',
-        projectLevelSharing: true,
-      }),
-    });
+    expect(studioRequestBodies.filter(request =>
+      request.path === '/integration/api/v1/user-profiles/upsert')).toHaveLength(0);
     const usersAfterPasswordUpdate = await app.inject({
       method: 'GET',
       url: '/api/admin/subaccounts?accountId=acc_demo',
@@ -498,6 +615,9 @@ describe('studio-login MVP', () => {
       tosBucketName: 'studio-login-test-next',
       projectLevelSharing: true,
     }));
+    expect(studioRequestBodies.filter(request =>
+      request.path === '/integration/api/v1/user-profiles/upsert'
+      && !request.body.userId)).toHaveLength(1);
 
     const priceImport = await app.inject({
       method: 'POST',
@@ -565,10 +685,51 @@ describe('studio-login MVP', () => {
         RequestId: 'req-1',
         UserId: 'worker',
         Status: 'SUCCEEDED',
-        Items: [{ BillingItemId: 'video-second', Unit: 'second', Usage: 8 }],
+        CallbackMetadata: { traceId: 'trace-1' },
+        Items: [{
+          BillingItemId: 'video-second',
+          Unit: 'second',
+          Usage: 8,
+          BillingContext: '{"output_tokens":8,"total_tokens":8}',
+          UsageMetadata: { source: 'operator' },
+        }],
       },
     });
     expect(callback.statusCode).toBe(200);
+    const callbackTaskRows = await database.query<{ taskId: string } & import('mysql2/promise').RowDataPacket>(
+      'SELECT task_id AS taskId FROM studio_tasks WHERE request_id = ?',
+      ['req-1'],
+    );
+    const callbackTaskId = callbackTaskRows[0]?.taskId;
+    expect(callbackTaskId).toBeTruthy();
+    const callbackAudit = await app.inject({
+      method: 'GET',
+      url: `/api/admin/model-usage/${callbackTaskId}/audit?accountId=acc_demo`,
+      headers: { cookie: adminCookie },
+    });
+    expect(callbackAudit.statusCode).toBe(200);
+    expect(callbackAudit.headers['content-disposition']).toContain('billing-audit-');
+    expect(callbackAudit.json().audit.settlement).toMatchObject({
+      source: 'callback',
+      requestBody: {
+        RequestId: 'req-1',
+        UserId: 'worker',
+        Status: 'SUCCEEDED',
+        CallbackMetadata: { traceId: 'trace-1' },
+        Items: [{
+          BillingItemId: 'video-second',
+          Unit: 'second',
+          Usage: 8,
+          BillingContext: '{"output_tokens":8,"total_tokens":8}',
+          UsageMetadata: { source: 'operator' },
+        }],
+      },
+      responseBody: {
+        code: 200,
+        message: 'success',
+        requestId: 'req-1',
+      },
+    });
 
     const period = new Intl.DateTimeFormat('en-CA', {
       timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit',
@@ -604,7 +765,7 @@ describe('studio-login MVP', () => {
     });
     expect(lostCallbackPrecheck.statusCode).toBe(200);
     await database.execute(
-      'UPDATE studio_tasks SET created_at = DATE_SUB(UTC_TIMESTAMP(), INTERVAL 20 MINUTE) WHERE request_id = ?',
+      'UPDATE studio_tasks SET created_at = DATE_SUB(CURRENT_TIMESTAMP(), INTERVAL 20 MINUTE) WHERE request_id = ?',
       ['req-lost-callback'],
     );
     studioUsagePayload = {
@@ -624,6 +785,38 @@ describe('studio-login MVP', () => {
     const reconciled = await reconciler.reconcile({ olderThanMinutes: 10, limit: 20 });
     expect(reconciled).toEqual({ scanned: 1, settled: 1, skipped: 0, failed: 0 });
     expect(studioCalls).toContain('/api/v1/open/usage/get');
+    const reconciledTaskRows = await database.query<{ taskId: string } & import('mysql2/promise').RowDataPacket>(
+      'SELECT task_id AS taskId FROM studio_tasks WHERE request_id = ?',
+      ['req-lost-callback'],
+    );
+    const reconciledTaskId = reconciledTaskRows[0]?.taskId;
+    expect(reconciledTaskId).toBeTruthy();
+    const reconcileAudit = await app.inject({
+      method: 'GET',
+      url: `/api/admin/model-usage/${reconciledTaskId}/audit?accountId=acc_demo`,
+      headers: { cookie: adminCookie },
+    });
+    expect(reconcileAudit.statusCode).toBe(200);
+    expect(reconcileAudit.json().audit).toMatchObject({
+      settlement: {
+        source: 'reconciliation',
+        requestBody: {
+          RequestId: 'req-lost-callback',
+          UserId: 'worker',
+          Status: 'SUCCEEDED',
+        },
+      },
+      reconciliationQueries: [{
+        request: {
+          method: 'POST',
+          body: { RequestIds: ['req-lost-callback'] },
+        },
+        response: {
+          httpStatus: 200,
+          body: studioUsagePayload,
+        },
+      }],
+    });
 
     const reconciledAgain = await reconciler.reconcile({ olderThanMinutes: 10, limit: 20 });
     expect(reconciledAgain).toEqual({ scanned: 0, settled: 0, skipped: 0, failed: 0 });
@@ -634,6 +827,72 @@ describe('studio-login MVP', () => {
     });
     expect(reconciledBill.json().items.find((item: { status: string }) => item.status === 'SUCCEEDED')
       .customer_amount).toBe('26.000000');
+
+    const deletedSubaccount = await app.inject({
+      method: 'DELETE',
+      url: `/api/admin/subaccounts/${subaccountId}?accountId=acc_demo`,
+      headers: { cookie: adminCookie },
+    });
+    expect(deletedSubaccount.statusCode).toBe(200);
+    expect(deletedSubaccount.json()).toMatchObject({
+      userId: subaccountId,
+      status: 'DELETED',
+    });
+    const usersAfterDelete = await app.inject({
+      method: 'GET',
+      url: '/api/admin/subaccounts?accountId=acc_demo',
+      headers: { cookie: adminCookie },
+    });
+    expect(usersAfterDelete.json().items).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ loginName: 'worker' }),
+    ]));
+
+    const recreatedSubaccount = await app.inject({
+      method: 'POST',
+      url: '/api/admin/subaccounts',
+      headers: { cookie: adminCookie },
+      payload: {
+        accountId: 'acc_demo',
+        loginName: 'worker',
+        displayName: 'Worker Recreated',
+        password: 'password-recreated',
+        configGroupId,
+        monthlyLimit: '70',
+      },
+    });
+    expect(recreatedSubaccount.statusCode).toBe(200);
+    expect(recreatedSubaccount.json()).toMatchObject({
+      userId: subaccountId,
+      status: 'ACTIVE',
+    });
+    const recreatedLogin = await app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: {
+        accountId: 'acc_demo',
+        loginName: 'worker',
+        password: 'password-recreated',
+      },
+    });
+    expect(recreatedLogin.statusCode).toBe(200);
+    const duplicateRecreatedSubaccount = await app.inject({
+      method: 'POST',
+      url: '/api/admin/subaccounts',
+      headers: { cookie: adminCookie },
+      payload: {
+        accountId: 'acc_demo',
+        loginName: 'worker',
+        displayName: 'Worker Duplicate',
+        password: 'password-duplicate',
+        configGroupId,
+        monthlyLimit: null,
+      },
+    });
+    expect(duplicateRecreatedSubaccount.statusCode).toBe(409);
+    expect(duplicateRecreatedSubaccount.json()).toMatchObject({
+      code: 'SUBACCOUNT_ALREADY_EXISTS',
+      messageKey: 'users.loginNameExists',
+    });
   }, 20_000);
 
   it('多 Studio 连接按配置组映射 Project、Ticket 与删除顺序', async () => {
@@ -725,13 +984,15 @@ describe('studio-login MVP', () => {
     });
     expect(subaccount.statusCode).toBe(200);
     const userId = subaccount.json().userId as string;
-    expect(studioRequestBodies).toContainEqual({
-      path: '/integration/api/v1/user-profiles/upsert',
-      body: expect.objectContaining({
-        appId: 'acc_demo',
-        projectId: 'studio_project_2',
-        userId: 'worker-second',
-      }),
+    const secondUserProfileRequests = studioRequestBodies.filter(request =>
+      request.path === '/integration/api/v1/user-profiles/upsert'
+      && request.body.userId === 'worker-second');
+    expect(secondUserProfileRequests).toHaveLength(1);
+    expect(secondUserProfileRequests[0]?.body).toMatchObject({
+      appId: 'acc_demo',
+      projectId: 'studio_project_2',
+      userId: 'worker-second',
+      projectLevelSharing: false,
     });
 
     const userCookie = await login('acc_demo', 'worker-second', 'password-123');

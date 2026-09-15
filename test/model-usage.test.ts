@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { tokenUsageSummary } from '../src/model-usage.js';
+import { ModelUsageService, tokenUsageSummary } from '../src/model-usage.js';
+import type { Database } from '../src/db.js';
 
 describe('token usage summary', () => {
   it('maps OpenAI Responses input, output and cached token fields', () => {
@@ -43,5 +44,61 @@ describe('token usage summary', () => {
       audioTokens: undefined,
       reasoningTokens: undefined,
     });
+  });
+});
+
+describe('model usage audit document', () => {
+  it('returns task metadata and parsed audit payload', async () => {
+    const database = {
+      query: async () => [{
+        taskId: 'task-1',
+        requestId: 'request-1',
+        status: 'SUCCEEDED',
+        billingAuditPayload: JSON.stringify({
+          version: 1,
+          settlement: {
+            source: 'callback',
+            requestBody: { RequestId: 'request-1' },
+          },
+        }),
+      }],
+      execute: async () => ({ affectedRows: 0 }),
+      transaction: async () => undefined,
+      close: async () => undefined,
+    } as unknown as Database;
+
+    await expect(new ModelUsageService(database).auditDocument('account-1', 'task-1'))
+      .resolves.toMatchObject({
+        task: {
+          taskId: 'task-1',
+          requestId: 'request-1',
+          status: 'SUCCEEDED',
+        },
+        audit: {
+          version: 1,
+          settlement: {
+            source: 'callback',
+            requestBody: { RequestId: 'request-1' },
+          },
+        },
+      });
+  });
+
+  it('rejects tasks without an audit payload', async () => {
+    const database = {
+      query: async () => [{
+        taskId: 'task-1',
+        billingAuditPayload: null,
+      }],
+      execute: async () => ({ affectedRows: 0 }),
+      transaction: async () => undefined,
+      close: async () => undefined,
+    } as unknown as Database;
+
+    await expect(new ModelUsageService(database).auditDocument('account-1', 'task-1'))
+      .rejects.toMatchObject({
+        code: 'BILLING_AUDIT_NOT_AVAILABLE',
+        statusCode: 404,
+      });
   });
 });

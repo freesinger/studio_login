@@ -8,7 +8,7 @@ import {
 
 describe('monthly quota presentation', () => {
   it('uses the Asia/Shanghai calendar month at the UTC boundary', () => {
-    expect(currentBillingPeriod(new Date('2026-08-31T16:00:00.000Z'))).toBe('2026-09');
+    expect(currentBillingPeriod(new Date('2026-08-31T16:00:00.000Z'), 'Asia/Shanghai')).toBe('2026-09');
   });
 
   it('subtracts settled and reserved amounts from a finite limit', () => {

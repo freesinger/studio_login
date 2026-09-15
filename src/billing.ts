@@ -3,11 +3,13 @@ import { randomUUID } from 'node:crypto';
 import { Decimal } from 'decimal.js';
 import type { RowDataPacket } from 'mysql2/promise';
 
+import { formatMessage, translate, type Locale, type LocalizedMessage, message } from './i18n.js';
 import type { Database, DatabaseExecutor } from './db.js';
 import { AppError } from './errors.js';
 import { noopLogger, type AppLogger } from './logging.js';
 import { currentBillingPeriod } from './quota.js';
 import { decryptJson } from './security.js';
+import { DEFAULT_PRICES, type DefaultPrices } from './deployment.js';
 import type { AppConfig } from './config.js';
 import type { Actor, ResourceConfig } from './types.js';
 
@@ -79,6 +81,7 @@ interface TaskRow extends RowDataPacket {
   billing_period: string;
   status: string;
   estimated_amount: string;
+  billing_audit_payload: string | Record<string, unknown> | null;
   login_name?: string;
 }
 
@@ -122,10 +125,39 @@ interface LimitCheckContext {
   configGroupId: string;
   billingPeriod: string;
   subjectType: 'CONFIG_GROUP' | 'USER';
-  label: string;
+  label: string | LocalizedMessage;
 }
 
 export type PriceScopeType = 'CONFIG_GROUP' | 'PLATFORM';
+
+export interface ReconciliationAudit {
+  request: {
+    method: 'POST';
+    url: string;
+    body: Record<string, unknown>;
+  };
+  response: {
+    httpStatus: number | null;
+    body: unknown;
+  };
+}
+
+interface BillingAuditPayload {
+  version: 1;
+  settlement?: {
+    source: 'callback' | 'reconciliation';
+    requestBody: BaselineCallbackInput;
+    responseBody: {
+      code: 200;
+      message: 'success';
+      requestId: string;
+    };
+    recordedAt: string;
+  };
+  reconciliationQueries?: Array<ReconciliationAudit & {
+    recordedAt: string;
+  }>;
+}
 
 function amount(value: Decimal): string {
   return value.toDecimalPlaces(6, Decimal.ROUND_HALF_UP).toFixed(6);
@@ -134,7 +166,7 @@ function amount(value: Decimal): string {
 function usage(value: number | string): Decimal {
   const parsed = new Decimal(value);
   if (!parsed.isFinite() || parsed.lte(0)) {
-    throw new AppError('Usage 必须大于 0', 400, 'INVALID_USAGE');
+    throw new AppError(message('billing.invalidUsage'), 400, 'INVALID_USAGE');
   }
   return parsed;
 }
@@ -147,6 +179,23 @@ function billingContext(value: string | undefined): string | null {
   } catch {
     return JSON.stringify({ raw: trimmed.slice(0, 10_000) });
   }
+}
+
+function billingAuditPayload(value: unknown): BillingAuditPayload {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return { version: 1, ...value } as BillingAuditPayload;
+  }
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return { version: 1, ...parsed } as BillingAuditPayload;
+      }
+    } catch {
+      // Ignore malformed historical values and replace them with a valid audit document.
+    }
+  }
+  return { version: 1 };
 }
 
 function billingContextObject(value: string | undefined): Record<string, unknown> | null {
@@ -175,7 +224,7 @@ function billingContextProjectId(item: BaselineItemInput): string | undefined {
     .find(value => value && typeof value === 'object' && !Array.isArray(value)) as Record<string, unknown> | undefined;
   const projectId = optionalText(extensions?.project_id) ?? optionalText(extensions?.projectId);
   if (projectId && projectId.length > 128) {
-    throw new AppError('BillingContext.extensions.project_id 长度不能超过 128', 400, 'BILLING_PROJECT_INVALID');
+    throw new AppError(message('billing.projectIdTooLong'), 400, 'BILLING_PROJECT_INVALID');
   }
   return projectId;
 }
@@ -187,7 +236,7 @@ export function baselineProjectId(input: Pick<BaselinePrecheckInput, 'Items' | '
     if (projectId) projectIds.add(projectId);
   }
   if (projectIds.size > 1) {
-    throw new AppError('BillingContext.extensions.project_id 不一致', 400, 'BILLING_PROJECT_MISMATCH');
+    throw new AppError(message('billing.projectMismatch'), 400, 'BILLING_PROJECT_MISMATCH');
   }
   const [projectId] = projectIds;
   return projectId ?? optionalText(input.ProjectId);
@@ -198,6 +247,7 @@ async function resolvePrice(
   configGroupId: string,
   item: BaselineItemInput,
   itemIndex: number,
+  defaults: DefaultPrices,
 ): Promise<PriceSnapshot> {
   const rows = await tx.query<PriceRow>(
     `SELECT billing_item_id, unit, customer_unit_price, cost_unit_price
@@ -214,8 +264,8 @@ async function resolvePrice(
   const row = rows[0] ?? {
     billing_item_id: item.BillingItemId,
     unit: item.Unit,
-    customer_unit_price: '1',
-    cost_unit_price: '0.5',
+    customer_unit_price: defaults.customerUnitPrice,
+    cost_unit_price: defaults.costUnitPrice,
     scope_type: 'BUILTIN_DEFAULT',
   };
   const estimatedUsage = usage(item.Usage);
@@ -288,7 +338,7 @@ function assertWithinLimit(
       configGroupId: context.configGroupId,
       billingPeriod: context.billingPeriod,
       subjectType: context.subjectType,
-      label: context.label,
+      label: formatMessage(context.label, 'zh-CN'),
       limit: amount(limitAmount),
       actualAmount: amount(actualAmount),
       reservedAmount: amount(reservedAmount),
@@ -301,7 +351,7 @@ function assertWithinLimit(
       event: 'billing_limit_exceeded',
       ...details,
     }, 'Billing monthly limit exceeded');
-    throw new AppError(`${context.label}月度额度不足`, 402, 'MONTHLY_LIMIT_EXCEEDED', details);
+    throw new AppError(message('quota.monthlyLimitExceeded', { subject: context.label }), 402, 'MONTHLY_LIMIT_EXCEEDED', details);
   }
 }
 
@@ -336,7 +386,7 @@ export class BillingService {
     new Decimal(input.costUnitPrice);
     if (input.scopeType === 'PLATFORM') {
       if (input.scopeId !== '*') {
-        throw new AppError('平台默认价格的作用范围无效', 400, 'INVALID_PRICE_SCOPE');
+        throw new AppError(message('pricing.invalidPlatformScope'), 400, 'INVALID_PRICE_SCOPE');
       }
     } else {
       const groups = await this.database.query<RowDataPacket>(
@@ -347,7 +397,7 @@ export class BillingService {
         [input.scopeId, input.accountId],
       );
       if (!groups[0]) {
-        throw new AppError('价格配置组不存在或不可用', 400, 'CONFIG_GROUP_NOT_AVAILABLE');
+        throw new AppError(message('pricing.groupUnavailable'), 400, 'CONFIG_GROUP_NOT_AVAILABLE');
       }
     }
     await this.database.execute(
@@ -377,11 +427,12 @@ export class BillingService {
     accountId: string,
     scopeType: PriceScopeType,
     scopeId: string,
+    locale: Locale = 'zh-CN',
   ): Promise<{ scopeName: string; items: unknown[] }> {
-    let scopeName = '平台默认';
+    let scopeName = translate('pricing.platformDefault', locale);
     if (scopeType === 'PLATFORM') {
       if (scopeId !== '*') {
-        throw new AppError('平台默认价格的作用范围无效', 400, 'INVALID_PRICE_SCOPE');
+        throw new AppError(message('pricing.invalidPlatformScope'), 400, 'INVALID_PRICE_SCOPE');
       }
     } else {
       const groups = await this.database.query<{ name: string } & RowDataPacket>(
@@ -392,7 +443,7 @@ export class BillingService {
         [scopeId, accountId],
       );
       if (!groups[0]) {
-        throw new AppError('价格配置组不存在或不可用', 400, 'CONFIG_GROUP_NOT_AVAILABLE');
+        throw new AppError(message('pricing.groupUnavailable'), 400, 'CONFIG_GROUP_NOT_AVAILABLE');
       }
       scopeName = groups[0].name;
     }
@@ -412,7 +463,7 @@ export class BillingService {
       items: rows.map(row => ({
         scopeType: row.scope_type,
         scopeId: row.scope_id,
-        scopeName: row.scope_type === 'PLATFORM' ? '平台默认' : row.scope_name,
+        scopeName: row.scope_type === 'PLATFORM' ? translate('pricing.platformDefault', locale) : row.scope_name,
         billingItemId: row.billing_item_id,
         unit: row.unit,
         customerUnitPrice: row.customer_unit_price,
@@ -439,10 +490,10 @@ export class BillingService {
         [input.scopeId, input.accountId],
       );
       if (!groups[0]) {
-        throw new AppError('价格配置组不存在或不可用', 400, 'CONFIG_GROUP_NOT_AVAILABLE');
+        throw new AppError(message('pricing.groupUnavailable'), 400, 'CONFIG_GROUP_NOT_AVAILABLE');
       }
     } else if (input.scopeId !== '*') {
-      throw new AppError('平台默认价格的作用范围无效', 400, 'INVALID_PRICE_SCOPE');
+      throw new AppError(message('pricing.invalidPlatformScope'), 400, 'INVALID_PRICE_SCOPE');
     }
     const result = await this.database.execute(
       `UPDATE operator_prices SET enabled = FALSE
@@ -450,7 +501,7 @@ export class BillingService {
       [input.scopeType, input.scopeId, input.billingItemId, input.unit],
     );
     if (result.affectedRows !== 1) {
-      throw new AppError('价格配置不存在', 404, 'PRICE_NOT_FOUND');
+      throw new AppError(message('pricing.notFound'), 404, 'PRICE_NOT_FOUND');
     }
   }
 
@@ -481,7 +532,7 @@ export class BillingService {
       );
       if (existing[0]) {
         if (existing[0].login_name === input.UserId) return;
-        throw new AppError('RequestId 已被其他用户使用', 409, 'REQUEST_ID_CONFLICT');
+        throw new AppError(message('billing.requestIdConflict'), 409, 'REQUEST_ID_CONFLICT');
       }
 
       const candidates = await tx.query<BillingUserRow>(
@@ -512,30 +563,30 @@ export class BillingService {
         return lasApiKey === suppliedLasApiKey.trim();
       });
       if (projectId && matching.length === 0) {
-        throw new AppError('当前账号未绑定本次任务所属 Project', 403, 'BILLING_PROJECT_NOT_BOUND');
+        throw new AppError(message('billing.projectNotBound'), 403, 'BILLING_PROJECT_NOT_BOUND');
       }
       if (matching.length > 1) {
         throw new AppError(
-          '当前 Studio 用量上报未携带 BillingContext.extensions.project_id，且该账号多个 Project 复用同一 LAS API Key，无法确定计费归属',
+          message('billing.projectAmbiguous'),
           409,
           'BILLING_CONFIG_GROUP_AMBIGUOUS',
         );
       }
       const user = matching[0];
       if (!user || user.status !== 'ACTIVE') {
-        throw new AppError('计费用户不存在或已停用', 403, 'BILLING_USER_DISABLED');
+        throw new AppError(message('billing.userDisabled'), 403, 'BILLING_USER_DISABLED');
       }
 
       if (!user.config_group_id || !['AVAILABLE', 'PARTIAL_FAILED'].includes(user.group_status ?? '')) {
-        throw new AppError('用户资源配置未就绪', 409, 'PROFILE_NOT_SYNCED');
+        throw new AppError(message('users.profileNotReady'), 409, 'PROFILE_NOT_SYNCED');
       }
       const configGroupId = user.config_group_id;
 
       const snapshots = await Promise.all(input.Items.map((item, index) =>
-        resolvePrice(tx, configGroupId, item, index)));
+        resolvePrice(tx, configGroupId, item, index, this.config?.defaultPrices ?? DEFAULT_PRICES)));
       const estimatedAmount = Decimal.sum(...snapshots.map(item => item.estimatedAmount));
       const estimatedCost = Decimal.sum(...snapshots.map(item => item.estimatedCost));
-      const period = currentBillingPeriod();
+      const period = currentBillingPeriod(new Date(), this.config?.timeZone);
       this.logger.info({
         event: 'billing_estimate_calculated',
         requestId: input.RequestId,
@@ -574,7 +625,7 @@ export class BillingService {
           configGroupId,
           billingPeriod: period,
           subjectType: 'CONFIG_GROUP',
-          label: '配置组',
+          label: message('common.resourceGroup'),
         },
       );
       assertWithinLimit(
@@ -591,7 +642,7 @@ export class BillingService {
           configGroupId,
           billingPeriod: period,
           subjectType: 'USER',
-          label: '子账号',
+          label: message('common.subaccount'),
         },
       );
 
@@ -662,6 +713,7 @@ export class BillingService {
     connectionId: string,
     appId: string,
     input: BaselineCallbackInput,
+    reconciliationAudit?: ReconciliationAudit,
   ): Promise<void> {
     const projectId = baselineProjectId(input);
     this.logger.info({
@@ -696,10 +748,10 @@ export class BillingService {
           }, 'Billing failure callback ignored because precheck did not create a task');
           return;
         }
-        throw new AppError('计费任务不存在', 404, 'TASK_NOT_FOUND');
+        throw new AppError(message('billing.taskNotFound'), 404, 'TASK_NOT_FOUND');
       }
       if (task.login_name !== input.UserId) {
-        throw new AppError('UserId 与原任务不匹配', 409, 'TASK_ACTOR_MISMATCH');
+        throw new AppError(message('billing.taskUserMismatch'), 409, 'TASK_ACTOR_MISMATCH');
       }
       if (task.status !== 'RUNNING') return;
 
@@ -713,13 +765,13 @@ export class BillingService {
         for (const stored of storedItems) {
           const actual = input.Items[Number(stored.item_index)];
           if (!actual) {
-            throw new AppError(`回调缺少计费项: ${stored.billing_item_id}#${stored.item_index}`, 400, 'CALLBACK_ITEM_MISSING');
+            throw new AppError(message('billing.callbackItemMissing', { billingItemId: stored.billing_item_id, index: stored.item_index }), 400, 'CALLBACK_ITEM_MISSING');
           }
           if (actual.BillingItemId !== stored.billing_item_id) {
-            throw new AppError(`计费项不匹配: ${stored.billing_item_id}#${stored.item_index}`, 400, 'BILLING_ITEM_MISMATCH');
+            throw new AppError(message('billing.itemMismatch', { billingItemId: stored.billing_item_id, index: stored.item_index }), 400, 'BILLING_ITEM_MISMATCH');
           }
           if (actual.Unit !== stored.unit) {
-            throw new AppError(`计费单位不匹配: ${stored.billing_item_id}`, 400, 'BILLING_UNIT_MISMATCH');
+            throw new AppError(message('billing.unitMismatch', { billingItemId: stored.billing_item_id }), 400, 'BILLING_UNIT_MISMATCH');
           }
           const actualUsage = usage(actual.Usage);
           actualAmount = actualAmount.plus(new Decimal(stored.customer_unit_price).mul(actualUsage));
@@ -765,9 +817,37 @@ export class BillingService {
       );
       await tx.execute(
         `UPDATE studio_tasks
-            SET status = ?, actual_amount = ?, actual_cost = ?, finished_at = UTC_TIMESTAMP(3)
+            SET status = ?, actual_amount = ?, actual_cost = ?,
+                billing_audit_payload = ?, finished_at = CURRENT_TIMESTAMP(3)
           WHERE task_id = ?`,
-        [input.Status, amount(actualAmount), amount(actualCost), task.task_id],
+        [
+          input.Status,
+          amount(actualAmount),
+          amount(actualCost),
+          JSON.stringify({
+            ...billingAuditPayload(task.billing_audit_payload),
+            settlement: {
+              source: reconciliationAudit ? 'reconciliation' : 'callback',
+              requestBody: input,
+              responseBody: {
+                code: 200,
+                message: 'success',
+                requestId: input.RequestId,
+              },
+              recordedAt: new Date().toISOString(),
+            },
+            ...(reconciliationAudit ? {
+              reconciliationQueries: [
+                ...(billingAuditPayload(task.billing_audit_payload).reconciliationQueries ?? []),
+                {
+                  ...reconciliationAudit,
+                  recordedAt: new Date().toISOString(),
+                },
+              ],
+            } : {}),
+          } satisfies BillingAuditPayload),
+          task.task_id,
+        ],
       );
       this.logger.info({
         event: input.Status === 'SUCCEEDED' ? 'billing_actual_settled' : 'billing_actual_released',
