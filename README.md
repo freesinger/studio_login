@@ -30,8 +30,6 @@ npm run dev
 
 服务启动并绑定 EIP 或域名后，管理员在页面填写一个公网接入地址；生产环境必须使用 HTTPS。该地址既是用户访问 Studio 的入口，也是 Studio 回调 Login 的入口，前端请求到达后由服务端转发到后端，用户不需要也不应该配置或暴露后端地址。所有 Studio 连接统一使用 `STUDIO_LOGIN_ACCOUNT_ID` 作为 `appId`，并使用同一个 `LAS_STUDIO_INTEGRATION_TOKEN`；接入新实例前由对应 Studio 管理员录入这组凭证。
 
-完整设计、流程和安全约束见 [doc/studio-login-mvp-design.md](doc/studio-login-mvp-design.md)。本地双服务启动和计费验证见
-[doc/studio-login-integration-test-manual.md](doc/studio-login-integration-test-manual.md)。
 
 ## 常用命令
 
