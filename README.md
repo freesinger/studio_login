@@ -1,6 +1,6 @@
 # studio-login
 
-Studio 企业登录、资源配置和后付费接入服务。使用 TypeScript、Fastify 和 MySQL 8，不依赖 Redis 或 H2。
+Studio 企业登录、资源配置和后付费接入服务。使用 TypeScript、Fastify 和 MySQL 8。
 
 服务启动时会自动：
 
