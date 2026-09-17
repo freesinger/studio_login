@@ -34,7 +34,7 @@ MySQL 可以和 Login 服务跑在**同一台机器**（测试环境、小规模
 
 任意 Linux 发行版，推荐：
 
-- Alibaba Cloud Linux 3 / CentOS 7+ / RHEL 8+
+- CentOS 7+ / RHEL 8+
 - Ubuntu 20.04+ / Debian 11+
 
 macOS / Windows 也能跑（Node.js + MySQL 都有对应版本），但生产环境建议 Linux。
