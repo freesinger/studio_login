@@ -142,6 +142,8 @@ export interface MessageParameters {
   'users.currentPasswordHelp': Record<string, never>;
   'users.legacyPasswordHelp': Record<string, never>;
   'users.passwordRequiredOnCreate': Record<string, never>;
+  'users.passwordPolicy': Record<string, never>;
+  'users.passwordMatchesPolicy': Record<string, never>;
   'users.creating': Record<string, never>;
   'users.updated': Record<string, never>;
   'users.created': Record<string, never>;
@@ -195,6 +197,11 @@ export interface MessageParameters {
   'auth.signInHelp': Record<string, never>;
   'auth.username': Record<string, never>;
   'auth.password': Record<string, never>;
+  'auth.captcha': Record<string, never>;
+  'auth.captchaImageAlt': Record<string, never>;
+  'auth.captchaRefresh': Record<string, never>;
+  'auth.captchaInvalid': Record<string, never>;
+  'auth.captchaLoadFailed': Record<string, never>;
   'projects.chooseTitle': Record<string, never>;
   'projects.chooseHelp': Record<string, never>;
   'projects.selection': Record<string, never>;
@@ -428,6 +435,7 @@ export interface MessageParameters {
   'csv.exampleGroup': Record<string, never>;
   'modelUsage.notReported': Record<string, never>;
   'validation.required': Record<string, never>;
+  'validation.passwordPolicy': Record<string, never>;
   'validation.invalidValue': Record<string, never>;
   'validation.minLength': { minLength: MessageValue };
   'validation.url': Record<string, never>;

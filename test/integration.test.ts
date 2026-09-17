@@ -10,6 +10,7 @@ import { bootstrapApplication } from '../src/bootstrap.js';
 import { loadConfig, type AppConfig } from '../src/config.js';
 import { createDatabase, type Database } from '../src/db.js';
 import { currentBillingPeriod } from '../src/quota.js';
+import { encryptJson } from '../src/security.js';
 import { StudioAdminClient } from '../src/studio-client.js';
 import { StudioConnectionService } from '../src/studio-connections.js';
 
@@ -35,11 +36,18 @@ function cookieFrom(headers: Record<string, unknown>): string {
   return value.split(';')[0] ?? '';
 }
 
+async function captchaFields(): Promise<{ captchaToken: string; captchaCode: string }> {
+  const response = await app.inject({ url: '/api/auth/captcha' });
+  expect(response.statusCode).toBe(200);
+  expect(response.json().image).toMatch(/^data:image\/png;base64,/);
+  return { captchaToken: response.json().captchaToken, captchaCode: 'ABCDE' };
+}
+
 async function login(accountId: string, loginName: string, password: string): Promise<string> {
   const response = await app.inject({
     method: 'POST',
     url: '/api/auth/login',
-    payload: { accountId, loginName, password },
+    payload: { accountId, loginName, password, ...await captchaFields() },
   });
   expect(response.statusCode).toBe(200);
   return cookieFrom(response.headers);
@@ -115,11 +123,11 @@ beforeAll(async () => {
     STUDIO_LOGIN_DATABASE_URL: testUrl,
     STUDIO_LOGIN_ACCOUNT_ID: 'acc_demo',
     STUDIO_LOGIN_ADMIN_USERNAME: 'root',
-    STUDIO_LOGIN_ADMIN_PASSWORD: 'password-123',
+    STUDIO_LOGIN_ADMIN_PASSWORD: 'StrongPass123!',
     LAS_STUDIO_INTEGRATION_TOKEN: integrationToken,
   });
   database = createDatabase(config);
-  app = await buildApp({ config, database });
+  app = await buildApp({ config, database, captchaAnswerFactory: () => 'ABCDE' });
 });
 
 beforeEach(async () => {
@@ -157,6 +165,56 @@ afterAll(async () => {
 });
 
 describe('studio-login MVP', () => {
+  it('requires a fresh one-use captcha before checking the password', async () => {
+    const credentials = { accountId: 'acc_demo', loginName: 'root', password: 'StrongPass123!' };
+    const missing = await app.inject({ method: 'POST', url: '/api/auth/login', payload: credentials });
+    expect(missing.statusCode).toBe(400);
+
+    const first = await captchaFields();
+    const wrong = await app.inject({ method: 'POST', url: '/api/auth/login', payload: {
+      ...credentials, ...first, captchaCode: 'ZZZZZ',
+    } });
+    expect(wrong.json().code).toBe('INVALID_CAPTCHA');
+    const replay = await app.inject({ method: 'POST', url: '/api/auth/login', payload: {
+      ...credentials, ...first,
+    } });
+    expect(replay.json().code).toBe('INVALID_CAPTCHA');
+
+    const expired = await app.inject({ method: 'POST', url: '/api/auth/login', payload: {
+      ...credentials,
+      captchaToken: encryptJson({ id: 'expired', answer: 'ABCDE', expiresAt: Date.now() - 1 }, config.encryptionKey),
+      captchaCode: 'ABCDE',
+    } });
+    expect(expired.json().code).toBe('INVALID_CAPTCHA');
+
+    const valid = await captchaFields();
+    expect((await app.inject({ method: 'POST', url: '/api/auth/login', payload: {
+      ...credentials, ...valid,
+    } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'POST', url: '/api/auth/login', payload: {
+      ...credentials, ...valid,
+    } })).json().code).toBe('INVALID_CAPTCHA');
+  });
+
+  it('rejects weak passwords in create, update, and CSV import', async () => {
+    const adminCookie = await login('acc_demo', 'root', 'StrongPass123!');
+    const headers = { cookie: adminCookie };
+    const create = await app.inject({ method: 'POST', url: '/api/admin/subaccounts', headers, payload: {
+      accountId: 'acc_demo', loginName: 'worker', displayName: 'Worker', password: 'weakpassword1!', monthlyLimit: null,
+    } });
+    expect(create.statusCode).toBe(400);
+    expect(create.json().details[0].message).toContain('大写字母');
+    const update = await app.inject({ method: 'PATCH', url: '/api/admin/subaccounts/unknown', headers, payload: {
+      accountId: 'acc_demo', displayName: 'Worker', password: 'weakpassword1!', monthlyLimit: null,
+    } });
+    expect(update.statusCode).toBe(400);
+    const csv = await app.inject({ method: 'POST', url: '/api/admin/subaccounts/import', headers, payload: {
+      accountId: 'acc_demo',
+      csv: 'loginName,displayName,password,configGroup,monthlyLimit\nworker,Worker,weakpassword1!,default,100\n',
+    } });
+    expect(csv.json()).toMatchObject({ total: 1, succeeded: 0, failed: 1 });
+  });
+
   it('keeps Date round trips, database clocks and session expiry consistent', async () => {
     await database.transaction(async tx => {
       await tx.execute('CREATE TEMPORARY TABLE clock_probe (created_at DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3), bound_at DATETIME(3))');
@@ -170,7 +228,7 @@ describe('studio-login MVP', () => {
         expect(Math.abs(Number(row.elapsed))).toBeLessThan(2);
       } finally { await tx.execute('DROP TEMPORARY TABLE clock_probe'); }
     });
-    const cookie = await login('acc_demo', 'root', 'password-123');
+    const cookie = await login('acc_demo', 'root', 'StrongPass123!');
     expect((await app.inject({ url: '/api/auth/me', headers: { cookie } })).statusCode).toBe(200);
     await database.execute('UPDATE sessions SET expires_at = ?', [new Date(Date.now() - 1000)]);
     expect((await app.inject({ url: '/api/auth/me', headers: { cookie } })).statusCode).toBe(401);
@@ -181,7 +239,7 @@ describe('studio-login MVP', () => {
     const deployment = { ...config, STUDIO_LOGIN_CURRENCY: currency, timeZone: 'America/Los_Angeles', defaultPrices };
     const variant = await buildApp({ config: deployment, database });
     try {
-      const cookie = await login('acc_demo', 'root', 'password-123');
+      const cookie = await login('acc_demo', 'root', 'StrongPass123!');
       expect((await configureStudio(cookie)).statusCode).toBe(200);
       const group = await app.inject({ method: 'POST', url: '/api/admin/config-groups', headers: { cookie }, payload: {
         accountId: 'acc_demo', name: 'Money test', monthlyLimit: '1000', isDefault: true,
@@ -190,10 +248,10 @@ describe('studio-login MVP', () => {
       expect(group.statusCode, group.body).toBe(200);
       const configGroupId = group.json().configGroupId;
       const user = await app.inject({ method: 'POST', url: '/api/admin/subaccounts', headers: { cookie }, payload: {
-        accountId: 'acc_demo', loginName: 'money-worker', displayName: 'Money worker', password: 'password-123', configGroupId, monthlyLimit: '100',
+        accountId: 'acc_demo', loginName: 'money-worker', displayName: 'Money worker', password: 'StrongPass123!', configGroupId, monthlyLimit: '100',
       } });
       expect(user.statusCode, user.body).toBe(200);
-      const userCookie = await login('acc_demo', 'money-worker', 'password-123');
+      const userCookie = await login('acc_demo', 'money-worker', 'StrongPass123!');
       const launchTicket = async () => {
         const response = await variant.inject({ method: 'POST', url: '/api/studio/tickets/launch', headers: { cookie: userCookie } });
         expect(response.statusCode, response.body).toBe(200);
@@ -274,7 +332,9 @@ describe('studio-login MVP', () => {
     expect(page.body).toContain('企业子账号');
     expect(page.body).toContain('Studio 服务连接');
     expect(page.body).toContain('保存并注册');
-    expect(page.body).toContain('完整的资源配置 JSON');
+    expect(page.body).toContain('完整资源配置');
+    expect(page.body).toContain('图形验证码');
+    expect(page.body).toContain('至少 12 位');
     expect(page.body).not.toContain('首次使用');
     expect(page.body).toContain('配置组名称');
     expect(page.body).not.toContain('企业管理员注册');
@@ -291,16 +351,49 @@ describe('studio-login MVP', () => {
     })).statusCode).toBe(401);
   });
 
+  it('按客户端 IP 限制验证码获取和登录请求', async () => {
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const response = await app.inject({ url: '/api/auth/captcha' });
+      expect(response.statusCode).toBe(200);
+    }
+    expect((await app.inject({ url: '/api/auth/captcha' })).statusCode).toBe(429);
+
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const response = await app.inject({
+        method: 'POST', url: '/api/auth/login', payload: {},
+      });
+      expect(response.statusCode).toBe(400);
+    }
+    expect((await app.inject({
+      method: 'POST', url: '/api/auth/login', payload: {},
+    })).statusCode).toBe(429);
+  });
+
   it('无公网地址时正常启动，并由 SYSTEM_ADMIN 在运行时完成 Studio 注册', async () => {
     expect(studioCalls).toEqual([]);
     await bootstrapApplication(database, config);
     const loginResponse = await app.inject({
       method: 'POST', url: '/api/auth/login',
       headers: { 'x-forwarded-proto': 'https' },
-      payload: { loginName: 'root', password: 'password-123' },
+      payload: { loginName: 'root', password: 'StrongPass123!', ...await captchaFields() },
     });
     expect(loginResponse.statusCode).toBe(200);
     expect(String(loginResponse.headers['set-cookie'])).toContain('Secure');
+    const productionApp = await buildApp({
+      config: { ...config, APP_ENV: 'production' }, database, captchaAnswerFactory: () => 'ABCDE',
+    });
+    try {
+      const captchaResponse = await productionApp.inject({ url: '/api/auth/captcha' });
+      const productionLogin = await productionApp.inject({
+        method: 'POST', url: '/api/auth/login',
+        payload: {
+          loginName: 'root', password: 'StrongPass123!',
+          captchaToken: captchaResponse.json().captchaToken, captchaCode: 'ABCDE',
+        },
+      });
+      expect(productionLogin.statusCode).toBe(200);
+      expect(String(productionLogin.headers['set-cookie'])).toContain('Secure');
+    } finally { await productionApp.close(); }
     const adminCookie = cookieFrom(loginResponse.headers);
     const systemAdmin = await app.inject({
       method: 'GET', url: '/api/auth/me', headers: { cookie: adminCookie },
@@ -344,7 +437,7 @@ describe('studio-login MVP', () => {
   });
 
   it('完成 Studio 注册、配置同步、Ticket 和后付费闭环', async () => {
-    const adminCookie = await login('acc_demo', 'root', 'password-123');
+    const adminCookie = await login('acc_demo', 'root', 'StrongPass123!');
     expect((await configureStudio(adminCookie)).statusCode).toBe(200);
 
     const groupResponse = await app.inject({
@@ -456,7 +549,7 @@ describe('studio-login MVP', () => {
         accountId: 'acc_demo',
         loginName: 'worker',
         displayName: 'Worker',
-        password: 'password-123',
+        password: 'StrongPass123!',
         configGroupId,
         monthlyLimit: '100',
       },
@@ -489,7 +582,7 @@ describe('studio-login MVP', () => {
       status: 'ACTIVE',
       configGroupId,
     });
-    expect(users.body).toContain('password-123');
+    expect(users.body).toContain('StrongPass123!');
 
     studioRequestBodies.length = 0;
     const updatedUser = await app.inject({
@@ -499,7 +592,7 @@ describe('studio-login MVP', () => {
       payload: {
         accountId: 'acc_demo',
         displayName: 'Worker Updated',
-        password: 'password-456',
+        password: 'StrongPass456!',
         configGroupId,
         monthlyLimit: '90',
       },
@@ -512,10 +605,10 @@ describe('studio-login MVP', () => {
       url: '/api/admin/subaccounts?accountId=acc_demo',
       headers: { cookie: adminCookie },
     });
-    expect(usersAfterPasswordUpdate.body).toContain('password-456');
+    expect(usersAfterPasswordUpdate.body).toContain('StrongPass456!');
     expect((await app.inject({
       method: 'POST', url: '/api/auth/login',
-      payload: { accountId: 'acc_demo', loginName: 'worker', password: 'password-123' },
+      payload: { accountId: 'acc_demo', loginName: 'worker', password: 'StrongPass123!', ...await captchaFields() },
     })).statusCode).toBe(401);
 
     const disabled = await app.inject({
@@ -527,7 +620,7 @@ describe('studio-login MVP', () => {
     expect(disabled.statusCode).toBe(200);
     expect((await app.inject({
       method: 'POST', url: '/api/auth/login',
-      payload: { accountId: 'acc_demo', loginName: 'worker', password: 'password-456' },
+      payload: { accountId: 'acc_demo', loginName: 'worker', password: 'StrongPass456!', ...await captchaFields() },
     })).statusCode).toBe(403);
     expect((await app.inject({
       method: 'PATCH',
@@ -553,7 +646,7 @@ describe('studio-login MVP', () => {
     expect(price.statusCode).toBe(200);
     const prices = await app.inject({
       method: 'GET',
-      url: '/api/admin/prices?accountId=acc_demo',
+      url: `/api/admin/prices?accountId=acc_demo&scopeType=CONFIG_GROUP&scopeId=${configGroupId}`,
       headers: { cookie: adminCookie },
     });
     expect(prices.statusCode).toBe(200);
@@ -580,7 +673,7 @@ describe('studio-login MVP', () => {
       headers: { cookie: adminCookie },
       payload: {
         accountId: 'acc_demo',
-        csv: 'loginName,displayName,password,configGroup,monthlyLimit\nworker2,Worker 2,password-789,acc_demo,80\n',
+        csv: 'loginName,displayName,password,configGroup,monthlyLimit\nworker2,Worker 2,StrongPass789!,acc_demo,80\n',
       },
     });
     expect(subaccountImport.statusCode).toBe(200);
@@ -633,7 +726,7 @@ describe('studio-login MVP', () => {
     expect(priceImport.statusCode).toBe(200);
     expect(priceImport.json()).toMatchObject({ total: 1, succeeded: 1, failed: 0 });
 
-    const userCookie = await login('acc_demo', 'worker', 'password-456');
+    const userCookie = await login('acc_demo', 'worker', 'StrongPass456!');
     const launch = await app.inject({
       method: 'POST',
       url: '/api/studio/tickets/launch',
@@ -855,7 +948,7 @@ describe('studio-login MVP', () => {
         accountId: 'acc_demo',
         loginName: 'worker',
         displayName: 'Worker Recreated',
-        password: 'password-recreated',
+        password: 'RecreatedPass123!',
         configGroupId,
         monthlyLimit: '70',
       },
@@ -871,7 +964,8 @@ describe('studio-login MVP', () => {
       payload: {
         accountId: 'acc_demo',
         loginName: 'worker',
-        password: 'password-recreated',
+        password: 'RecreatedPass123!',
+        ...await captchaFields(),
       },
     });
     expect(recreatedLogin.statusCode).toBe(200);
@@ -883,7 +977,7 @@ describe('studio-login MVP', () => {
         accountId: 'acc_demo',
         loginName: 'worker',
         displayName: 'Worker Duplicate',
-        password: 'password-duplicate',
+        password: 'DuplicatePass123!',
         configGroupId,
         monthlyLimit: null,
       },
@@ -896,7 +990,7 @@ describe('studio-login MVP', () => {
   }, 20_000);
 
   it('多 Studio 连接按配置组映射 Project、Ticket 与删除顺序', async () => {
-    const adminCookie = await login('acc_demo', 'root', 'password-123');
+    const adminCookie = await login('acc_demo', 'root', 'StrongPass123!');
     const defaultConnection = await configureStudio(adminCookie);
     expect(defaultConnection.statusCode).toBe(200);
     const defaultConnectionId = defaultConnection.json().connection.connectionId as string;
@@ -977,7 +1071,7 @@ describe('studio-login MVP', () => {
         accountId: 'acc_demo',
         loginName: 'worker-second',
         displayName: 'Worker Second',
-        password: 'password-123',
+        password: 'StrongPass123!',
         configGroupId,
         monthlyLimit: null,
       },
@@ -995,7 +1089,7 @@ describe('studio-login MVP', () => {
       projectLevelSharing: false,
     });
 
-    const userCookie = await login('acc_demo', 'worker-second', 'password-123');
+    const userCookie = await login('acc_demo', 'worker-second', 'StrongPass123!');
     const launch = await app.inject({
       method: 'POST',
       url: '/api/studio/tickets/launch',

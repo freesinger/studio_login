@@ -134,8 +134,13 @@ const config = loadConfig({
   STUDIO_LOGIN_ADMIN_PASSWORD: 'test-password-123',
   LAS_STUDIO_INTEGRATION_TOKEN: 'test-integration-token-01234567890123',
 });
-// These routes reject before needing a database; no development data is touched.
-const app = await buildApp({ config, database: {} as Database });
+// The login rate limit uses an in-memory stub; no development data is touched.
+const validationDatabase = {
+  transaction: async (work: (tx: Database) => Promise<unknown>) => work({
+    query: async () => [], execute: async () => undefined,
+  } as unknown as Database),
+} as unknown as Database;
+const app = await buildApp({ config, database: validationDatabase });
 afterAll(() => app.close());
 
 describe('HTTP language contract', () => {

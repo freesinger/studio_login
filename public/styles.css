@@ -27,6 +27,14 @@ input:disabled, select:disabled, textarea:disabled, input[readonly], textarea[re
 .secret-input input { padding-right: 90px; }
 .secret-toggle { position: absolute; top: 5px; right: 5px; min-height: 34px; padding: 0 10px; border: 0; border-radius: 6px; background: #f3f1ec; cursor: pointer; color: #625f59; font-size: 12px; }
 .secret-value { min-width: 72px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.captcha-row { display: flex; align-items: center; gap: 8px; }
+.captcha-row input { min-width: 0; flex: 1; text-transform: uppercase; }
+.captcha-row img { width: 152px; height: 52px; border: 1px solid #d9d5ce; border-radius: 8px; background: #f5f1e8; }
+.captcha-row button { flex: none; padding: 0 9px; font-size: 12px; }
+.password-rule { color: #625f59; font-size: 12px; line-height: 1.5; }
+.password-feedback { color: #24714d; font-size: 12px; line-height: 1.5; }
+.password-feedback.invalid { color: #ad2e24; }
+@media (max-width: 520px) { .captcha-row { flex-wrap: wrap; } .captcha-row input { flex-basis: 100%; } }
 .primary, .secondary { min-height: 44px; padding: 0 18px; border-radius: 9px; border: 1px solid #1c1c1a; cursor: pointer; font-weight: 680; }
 .primary { color: white; background: #1c1c1a; }
 .primary:hover { background: #34342f; }

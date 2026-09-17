@@ -15,6 +15,7 @@ import { z, ZodError } from 'zod';
 
 import { message, formatValidationIssues, requestLocale, translate, type LocalizedMessage } from './i18n.js';
 import { AuthService, SESSION_COOKIE_NAME } from './auth.js';
+import { CaptchaService } from './captcha.js';
 import {
   BillingService,
   type BaselineCallbackInput,
@@ -28,6 +29,8 @@ import type { Database } from './db.js';
 import { AppError } from './errors.js';
 import { createAppLogger } from './logging.js';
 import { ModelUsageService } from './model-usage.js';
+import { strongPasswordSchema } from './password-policy.js';
+import { assertRateLimit } from './rate-limit.js';
 import { StudioAdminClient } from './studio-client.js';
 import { StudioConnectionService } from './studio-connections.js';
 import { TicketService } from './tickets.js';
@@ -37,6 +40,8 @@ const loginSchema = z.object({
   connectionId: z.string().min(1).max(64).optional(),
   loginName: z.string().min(1).max(128),
   password: z.string().min(1).max(128),
+  captchaToken: z.string().min(1).max(2048),
+  captchaCode: z.string().min(1).max(8),
   configGroup: z.string().min(1).max(128).optional(),
 });
 
@@ -108,7 +113,7 @@ const createSubaccountSchema = z.object({
   accountId: z.string().min(1).max(64),
   loginName: z.string().min(3).max(64),
   displayName: z.string().min(1).max(128),
-  password: z.string().min(8).max(128),
+  password: strongPasswordSchema,
   configGroupId: z.string().min(1).max(64).optional(),
   configGroupBindings: z.array(z.object({
     configGroupId: z.string().min(1).max(64),
@@ -126,7 +131,7 @@ const subaccountStatusSchema = z.object({
 const updateSubaccountSchema = z.object({
   accountId: z.string().min(1).max(64),
   displayName: z.string().min(1).max(128),
-  password: z.string().min(8).max(128).optional(),
+  password: strongPasswordSchema.optional(),
   configGroupId: z.string().min(1).max(64).optional(),
   configGroupBindings: z.array(z.object({
     configGroupId: z.string().min(1).max(64),
@@ -168,7 +173,7 @@ const customModelTestSchema = z.object({
 const subaccountCsvRowSchema = z.object({
   loginName: z.string().min(3).max(64),
   displayName: z.string().min(1).max(128),
-  password: z.string().min(8).max(128),
+  password: strongPasswordSchema,
   configGroup: z.string().min(1).max(128),
   monthlyLimit: z.string().max(64).optional(),
 }).passthrough();
@@ -354,13 +359,14 @@ export interface AppDependencies {
   config: AppConfig;
   database: Database;
   logger?: FastifyBaseLogger;
+  captchaAnswerFactory?: () => string;
 }
 
 export async function buildApp(dependencies: AppDependencies): Promise<FastifyInstance> {
   const { config, database } = dependencies;
   const logger: FastifyBaseLogger = dependencies.logger ?? createAppLogger(config);
   const app = Fastify({
-    trustProxy: true,
+    trustProxy: false,
     loggerInstance: logger,
     genReqId: request => validRequestId(headerValue(request.headers['x-request-id']))
       ?? validRequestId(headerValue(request.headers['x-las-request-id']))
@@ -376,7 +382,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     reply.header('x-content-type-options', 'nosniff');
     reply.header('x-frame-options', 'DENY');
     reply.header('referrer-policy', 'no-referrer');
-    reply.header('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
+    reply.header('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
     if (request.url.startsWith('/api/')) {
       const locale = requestLocale(request.headers['accept-language']);
       reply.header('content-language', locale);
@@ -390,6 +396,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
   });
 
   const auth = new AuthService(database, config);
+  const captcha = new CaptchaService(database, config.encryptionKey, dependencies.captchaAnswerFactory);
   const studioClient = new StudioAdminClient(app.log);
   const studioConnections = new StudioConnectionService(database, config, studioClient);
   const configGroups = new ConfigGroupService(database, config, studioConnections);
@@ -490,17 +497,29 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     };
   });
 
+  app.get('/api/auth/captcha', async (request, reply) => {
+    reply.header('cache-control', 'no-store');
+    return captcha.issue(requestIp(request));
+  });
+
   app.post('/api/auth/login', async (request, reply) => {
+    const clientIp = requestIp(request);
+    await assertRateLimit(database, {
+      action: 'login-ip', subject: clientIp, limit: 60, windowMs: 10 * 60 * 1000,
+    });
     const body = loginSchema.parse(request.body);
+    await captcha.verify(body.captchaToken, body.captchaCode);
     const session = await auth.login({
       ...body,
       accountId: body.accountId ?? config.STUDIO_LOGIN_ACCOUNT_ID,
-      clientIp: requestIp(request),
+      clientIp,
     });
     reply.setCookie(SESSION_COOKIE_NAME, session.token, {
       httpOnly: true,
       sameSite: 'lax',
-      secure: request.protocol === 'https',
+      secure: config.APP_ENV === 'production'
+        || request.protocol === 'https'
+        || headerValue(request.headers['x-forwarded-proto']) === 'https',
       path: '/',
       expires: new Date(session.expiresAt),
     });
@@ -695,7 +714,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     return reply
       .type('text/csv; charset=utf-8')
       .header('content-disposition', 'attachment; filename="studio-subaccounts.csv"')
-      .send(`\uFEFFloginName,displayName,password,configGroup,monthlyLimit\nworker,${translate('csv.exampleUser', requestLocale(request.headers['accept-language']))},password-123,${translate('csv.exampleGroup', requestLocale(request.headers['accept-language']))},100\n`);
+      .send(`\uFEFFloginName,displayName,password,configGroup,monthlyLimit\nworker,${translate('csv.exampleUser', requestLocale(request.headers['accept-language']))},,${translate('csv.exampleGroup', requestLocale(request.headers['accept-language']))},100\n`);
   });
 
   app.post('/api/admin/subaccounts/import', async request => {

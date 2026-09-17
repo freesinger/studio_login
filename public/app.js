@@ -1106,6 +1106,12 @@ function openUserActionMenu(button, user) {
   menu.classList.remove('hidden');
 }
 
+function isStrongPassword(value) {
+  return value.length >= 12 && value.length <= 128
+    && /[A-Z]/.test(value) && /[a-z]/.test(value) && /[0-9]/.test(value)
+    && /[\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E]/.test(value);
+}
+
 function openUserDialog(user = null) {
   const available = state.groups.filter(group => ['AVAILABLE', 'PARTIAL_FAILED'].includes(group.status));
   if (available.length === 0) {
@@ -1125,12 +1131,13 @@ function openUserDialog(user = null) {
   setText('#user-submit', user ? t('common.save') : t('users.createAccount'));
   form.elements.loginName.readOnly = Boolean(user);
   form.elements.password.required = !user;
-  form.dataset.originalPassword = user?.password || '';
+  form.elements.password.value = '';
+  setText('#user-password-feedback', '');
+  $('#user-password-feedback').classList.remove('invalid');
   setText('#user-password-help', user?.password ? t('users.currentPasswordHelp') : user ? t('users.legacyPasswordHelp') : t('users.passwordRequiredOnCreate'));
   if (user) {
     form.elements.displayName.value = user.displayName || '';
     form.elements.loginName.value = user.loginName || '';
-    form.elements.password.value = user.password || '';
   }
   renderUserBindingCards((user?.bindings || []).map(binding => ({
     configGroupId: binding.configGroupId,
@@ -1146,14 +1153,17 @@ async function submitUser(event) {
   try {
     setFormMessage(form, t('users.creating'));
     const userId = $('#user-id').value;
+    const newPassword = form.elements.password.value;
+    if (newPassword && !isStrongPassword(newPassword)) {
+      setFormMessage(form, t('validation.passwordPolicy'), true);
+      return;
+    }
     const payload = {
         accountId: state.actor.accountId,
         displayName: form.elements.displayName.value.trim(),
         configGroupBindings: collectUserBindings(),
     };
-    if (form.elements.password.value && form.elements.password.value !== form.dataset.originalPassword) {
-      payload.password = form.elements.password.value;
-    }
+    if (newPassword) payload.password = newPassword;
     if (!userId) payload.loginName = form.elements.loginName.value.trim();
     await api(userId ? `/api/admin/subaccounts/${encodeURIComponent(userId)}` : '/api/admin/subaccounts', {
       method: userId ? 'PATCH' : 'POST',
@@ -1545,6 +1555,22 @@ function switchSection(section) {
   if (section === 'bills') loadBills().catch(error => toast(error.message, true));
 }
 
+async function loadCaptcha() {
+  const form = $('#login-form');
+  $('#login-submit').disabled = true;
+  $('#refresh-captcha').disabled = true;
+  form.elements.captchaToken.value = '';
+  form.elements.captchaCode.value = '';
+  try {
+    const challenge = await api('/api/auth/captcha');
+    $('#captcha-image').src = challenge.image;
+    form.elements.captchaToken.value = challenge.captchaToken;
+    $('#login-submit').disabled = false;
+  } finally {
+    $('#refresh-captcha').disabled = false;
+  }
+}
+
 $('#login-form').addEventListener('submit', async event => {
   event.preventDefault();
   const form = event.currentTarget;
@@ -1562,12 +1588,18 @@ $('#login-form').addEventListener('submit', async event => {
   } catch (error) {
     message.textContent = error.message;
     message.classList.add('error');
+    await loadCaptcha().catch(() => {
+      message.textContent = `${error.message} ${t('auth.captchaLoadFailed')}`;
+    });
   }
 });
 
-// Enable submission only after the handler above can prevent native navigation.
-$('#login-submit').disabled = false;
-
+$('#refresh-captcha').addEventListener('click', () => {
+  loadCaptcha().catch(error => {
+    setText('#login-message', error.message || t('auth.captchaLoadFailed'));
+    $('#login-message').classList.add('error');
+  });
+});
 $('#logout').addEventListener('click', async () => {
   await api('/api/auth/logout', { method: 'POST', body: '{}' });
   window.location.reload();
@@ -1601,6 +1633,13 @@ $('#user-csv-file').addEventListener('change', event => {
   const [file] = event.target.files;
   if (file) importCsv('subaccounts', file);
   event.target.value = '';
+});
+$('#user-form').elements.password.addEventListener('input', event => {
+  const password = event.currentTarget.value;
+  $('#user-password-feedback').classList.toggle('invalid', Boolean(password) && !isStrongPassword(password));
+  setText('#user-password-feedback', password
+    ? t(isStrongPassword(password) ? 'users.passwordMatchesPolicy' : 'validation.passwordPolicy')
+    : '');
 });
 $('#price-csv-file').addEventListener('change', event => {
   const [file] = event.target.files;
@@ -1806,4 +1845,7 @@ api('/api/auth/me')
     const section = window.location.hash.slice(1);
     if (state.actor?.role !== 'SUBACCOUNT' && Object.hasOwn(sectionTitles, section)) switchSection(section);
   })
-  .catch(() => undefined);
+  .catch(() => loadCaptcha().catch(error => {
+    setText('#login-message', error.message || t('auth.captchaLoadFailed'));
+    $('#login-message').classList.add('error');
+  }));

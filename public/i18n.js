@@ -52,7 +52,7 @@ export function t(key, params = {}) {
 for (const node of document.querySelectorAll('[data-i18n]')) {
   node.textContent = t(node.dataset.i18n, { currency: runtimeConfig.currency, timeZone: runtimeConfig.timeZone });
 }
-for (const attribute of ['placeholder', 'title', 'aria-label']) {
+for (const attribute of ['placeholder', 'title', 'aria-label', 'alt']) {
   for (const node of document.querySelectorAll(`[data-i18n-${attribute}]`)) {
     node.setAttribute(attribute, t(node.getAttribute(`data-i18n-${attribute}`)));
   }

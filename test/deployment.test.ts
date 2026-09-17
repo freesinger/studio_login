@@ -16,6 +16,20 @@ const env = {
 };
 
 describe('deployment configuration', () => {
+  it('ignores forwarded client IPs without proxy configuration', async () => {
+    const config = loadConfig(env);
+    const app = await buildApp({ config, database: {} as Database });
+    app.get('/test/client-ip', request => ({ ip: request.ip }));
+    try {
+      const response = await app.inject({
+        url: '/test/client-ip',
+        headers: { 'x-forwarded-for': '203.0.113.9' },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().ip).toBe('127.0.0.1');
+    } finally { await app.close(); }
+  });
+
   it('keeps original CNY prices and Shanghai time zone when configuration is omitted', () => {
     const config = loadConfig(env);
     expect(config.STUDIO_LOGIN_CURRENCY).toBe('CNY');

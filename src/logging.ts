@@ -29,6 +29,8 @@ export function createAppLogger(config: AppConfig): Logger {
         'res.headers.set-cookie',
         'body.apiKey',
         'body.password',
+        'body.captchaToken',
+        'body.captchaCode',
         'body.csv',
         'body.integrationToken',
         'body.resourceConfig',

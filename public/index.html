@@ -29,6 +29,8 @@
         <p class="muted" data-i18n="auth.signInHelp">管理员进入管理工作台，企业子账号登录后选择 Project 打开 Studio。</p>
         <label><span data-i18n="auth.username">登录账号</span><input name="loginName" required autocomplete="username"></label>
         <label><span data-i18n="auth.password">密码</span><input name="password" type="password" required autocomplete="current-password"></label>
+        <label><span data-i18n="auth.captcha">图形验证码</span><span class="captcha-row"><input name="captchaCode" required maxlength="5" autocomplete="off" inputmode="text"><img id="captcha-image" width="190" height="64" alt="验证码图片" data-i18n-alt="auth.captchaImageAlt"><button id="refresh-captcha" class="secondary compact" type="button" data-i18n="auth.captchaRefresh">换一张</button></span></label>
+        <input name="captchaToken" type="hidden">
         <button id="login-submit" class="primary" type="submit" data-i18n="auth.signIn" disabled>登录</button>
       </form>
       <p class="message" id="login-message" aria-live="polite"></p>
@@ -200,7 +202,7 @@
       </section>
       <label><span data-i18n="users.displayName">显示名称</span><input name="displayName" required maxlength="128"></label>
       <label><span data-i18n="auth.username">登录账号</span><input name="loginName" required minlength="3" maxlength="64" autocomplete="off"></label>
-      <label><span data-i18n="auth.password">密码</span><span class="secret-input"><input name="password" type="password" required minlength="8" maxlength="128" autocomplete="off"><button id="toggle-user-password" class="secret-toggle" type="button" aria-label="显示密码" data-i18n-aria-label="common.passwordShowLabel" data-i18n="common.show">查看</button></span><span class="muted" id="user-password-help" data-i18n="users.passwordRequiredOnCreate">创建时必填</span></label>
+      <label><span data-i18n="auth.password">密码</span><span class="secret-input"><input name="password" type="password" required minlength="12" maxlength="128" autocomplete="new-password" aria-describedby="user-password-help user-password-policy user-password-feedback"><button id="toggle-user-password" class="secret-toggle" type="button" aria-label="显示密码" data-i18n-aria-label="common.passwordShowLabel" data-i18n="common.show">查看</button></span><span class="muted" id="user-password-help" data-i18n="users.passwordRequiredOnCreate">创建时必填</span><span class="password-rule" id="user-password-policy" data-i18n="users.passwordPolicy">至少 12 位，包含大写字母、小写字母、数字和特殊字符</span><span class="password-feedback" id="user-password-feedback" aria-live="polite"></span></label>
       <p class="muted" id="user-limit-help" data-i18n="users.monthlyLimitHelp">子账号月度上限按配置组分别生效，并仍受对应配置组共享上限约束。</p>
       <p class="message form-message" aria-live="polite"></p>
       <div class="dialog-actions"><button class="secondary close-dialog" type="button" data-i18n="common.cancel">取消</button><button id="user-submit" class="primary compact" type="submit" data-i18n="users.createAccount">创建账号</button></div>
