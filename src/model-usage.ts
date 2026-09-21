@@ -174,13 +174,33 @@ export class ModelUsageService {
       JOIN users u ON u.user_id = t.user_id
       WHERE ${where.join(' AND ')}`;
     const usageExpression = 'COALESCE(i.actual_usage, i.estimated_usage)';
+    const customerAmountExpression = `CASE
+      WHEN i.status IN ('FAILED', 'CANCELLED') THEN 0
+      WHEN i.customer_price_formula IS NULL
+        THEN ${usageExpression} * i.customer_unit_price
+      ELSE COALESCE(
+        i.actual_customer_amount,
+        i.estimated_customer_amount,
+        ${usageExpression} * i.customer_unit_price
+      )
+    END`;
+    const costAmountExpression = `CASE
+      WHEN i.status IN ('FAILED', 'CANCELLED') THEN 0
+      WHEN i.cost_price_formula IS NULL
+        THEN ${usageExpression} * i.cost_unit_price
+      ELSE COALESCE(
+        i.actual_cost_amount,
+        i.estimated_cost_amount,
+        ${usageExpression} * i.cost_unit_price
+      )
+    END`;
     const totals = (await this.database.query<RowDataPacket>(
       `SELECT COUNT(*) AS callCount,
               SUM(i.status = 'SUCCEEDED') AS successCount,
               SUM(i.status IN ('FAILED', 'CANCELLED')) AS failedCount,
               SUM(i.status = 'RUNNING') AS runningCount,
-              COALESCE(SUM(${usageExpression} * i.customer_unit_price), 0) AS customerAmount,
-              COALESCE(SUM(${usageExpression} * i.cost_unit_price), 0) AS costAmount
+              COALESCE(SUM(${customerAmountExpression}), 0) AS customerAmount,
+              COALESCE(SUM(${costAmountExpression}), 0) AS costAmount
          ${from}`,
       params,
     ))[0] ?? {};
@@ -220,8 +240,8 @@ export class ModelUsageService {
                 SUM(i.status IN ('FAILED', 'CANCELLED')) AS failedCount,
                 SUM(i.status = 'RUNNING') AS runningCount,
                 COALESCE(SUM(${usageExpression}), 0) AS usageValue,
-                COALESCE(SUM(${usageExpression} * i.customer_unit_price), 0) AS customerAmount,
-                COALESCE(SUM(${usageExpression} * i.cost_unit_price), 0) AS costAmount
+                COALESCE(SUM(${customerAmountExpression}), 0) AS customerAmount,
+                COALESCE(SUM(${costAmountExpression}), 0) AS costAmount
            ${from}
           GROUP BY ${group.id}, ${group.name}, i.unit
           ORDER BY callCount DESC, dimensionName, i.unit
@@ -249,8 +269,8 @@ export class ModelUsageService {
                 (t.billing_audit_payload IS NOT NULL) AS hasAuditPayload,
                 i.estimated_billing_context AS estimatedBillingContext,
                 i.actual_billing_context AS actualBillingContext,
-                (${usageExpression} * i.customer_unit_price) AS customerAmount,
-                (${usageExpression} * i.cost_unit_price) AS costAmount,
+                ${customerAmountExpression} AS customerAmount,
+                ${costAmountExpression} AS costAmount,
                 t.config_group_id AS configGroupId, g.name AS configGroupName,
                 t.user_id AS userId, u.login_name AS loginName, u.display_name AS displayName
            ${from}

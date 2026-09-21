@@ -30,6 +30,7 @@ npm run dev
 
 服务启动并绑定 EIP 或域名后，管理员在页面填写一个公网接入地址；生产环境必须使用 HTTPS。该地址既是用户访问 Studio 的入口，也是 Studio 回调 Login 的入口，前端请求到达后由服务端转发到后端，用户不需要也不应该配置或暴露后端地址。所有 Studio 连接统一使用 `STUDIO_LOGIN_ACCOUNT_ID` 作为 `appId`，并使用同一个 `LAS_STUDIO_INTEGRATION_TOKEN`；接入新实例前由对应 Studio 管理员录入这组凭证。
 
+创建或修改子账号密码时，至少填写 12 位，并同时包含大写字母、小写字母、数字和特殊字符；CSV 导入也按同一规则校验。编辑子账号时将密码留空，会保留原密码。登录页使用有效期 2 分钟、只能提交一次的图形验证码。单个客户端 IP 每 10 分钟最多获取 30 张验证码、发起 60 次登录请求；每个账号与 IP 组合每 10 分钟最多尝试 10 次密码。
 
 ## 常用命令
 
@@ -43,6 +44,13 @@ npm run dev
 | `npm run db:check` | 检查数据库连接和关键表 |
 | `npm run check:sensitive` | 扫描高风险敏感内容 |
 | `npm test` | 运行真实 MySQL 集成测试 |
+
+## 使用文档
+
+- [Studio Login 使用手册](doc/user-guide.md)：登录、Studio 连接、资源配置组、子账号、价格、模型统计和账单的日常操作。
+- [Studio 与 studio-login 本地联调测试手册](doc/studio-login-integration-test-manual.md)：本地双服务联调和计费链路验证。
+- [部署币种与时区](doc/deployment-currency-timezone.md)：部署币种、账期时区和金额口径。
+- [国际化](doc/i18n.md)：多语言文案和开发规范。
 
 ## 常见问题
 

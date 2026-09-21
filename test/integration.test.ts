@@ -107,6 +107,14 @@ beforeAll(async () => {
                       billingItemId: 'image', unit: 'count',
                       operatorIds: ['image'],
                     },
+                    {
+                      billingItemId: 'las_llm_seed-2.0-lite', unit: 'request',
+                      operatorIds: ['chat-completions'],
+                    },
+                    {
+                      billingItemId: 'ordinary-request', unit: 'request',
+                      operatorIds: ['ordinary-operator'],
+                    },
                   ],
                 },
               }
@@ -243,7 +251,18 @@ describe('studio-login MVP', () => {
       expect((await configureStudio(cookie)).statusCode).toBe(200);
       const group = await app.inject({ method: 'POST', url: '/api/admin/config-groups', headers: { cookie }, payload: {
         accountId: 'acc_demo', name: 'Money test', monthlyLimit: '1000', isDefault: true,
-        resourceConfig: { lasApiKey: 'test-las', arkApiKey: 'test-ark', tosBucketName: 'test-bucket' },
+        resourceConfig: {
+          lasApiKey: 'test-las',
+          arkApiKey: 'test-ark',
+          tosBucketName: 'test-bucket',
+          customModels: [{
+            name: 'GPT 5.6 Sol',
+            type: 'LANGUAGE',
+            model: 'gpt-5.6-sol',
+            endpoint: 'https://example.com',
+            apiKey: 'custom-model-key',
+          }],
+        },
       } });
       expect(group.statusCode, group.body).toBe(200);
       const configGroupId = group.json().configGroupId;
@@ -269,7 +288,8 @@ describe('studio-login MVP', () => {
       expect(list.statusCode, list.body).toBe(200);
       expect(list.json().items.find((item: any) => item.billingItemId === 'image')).toMatchObject(defaultPrices);
       const csv = await variant.inject({ url: '/api/admin/prices/import-template?accountId=acc_demo', headers: { cookie } });
-      expect(csv.body).toContain(`image,count,${defaultPrices.customerUnitPrice},${defaultPrices.costUnitPrice}`);
+      expect(csv.body).toContain('billingItemId,unit,customerPricingMode,customerUnitPrice,customerPriceFormula,costPricingMode,costUnitPrice,costPriceFormula');
+      expect(csv.body).toContain(`image,count,UNIT,${defaultPrices.customerUnitPrice},,UNIT,${defaultPrices.costUnitPrice},`);
       const headers = { 'x-app-id': 'acc_demo', 'x-las-api-key': 'test-las' };
       const precheck = (requestId: string) => variant.inject({ method: 'POST', url: '/api/studio/baseline/tasks?connection_id=acc_demo', headers, payload: {
         RequestId: requestId, UserId: 'money-worker', Items: [{ BillingItemId: 'image', Unit: 'count', Usage: 2 }],
@@ -305,6 +325,610 @@ describe('studio-login MVP', () => {
       expect(Object.fromEntries(snapshots.map(row => [row.request_id, Number(row.customer_unit_price)]))).toEqual({
         'default-price': Number(defaultPrices.customerUnitPrice), 'platform-price': 0.25, 'group-price': 0.375,
       });
+      const customerFormula = '(prompt_tokens - prompt_tokens_details.cached_tokens) * 0.002'
+        + ' + prompt_tokens_details.cached_tokens * 0.0002'
+        + ' + completion_tokens * 0.001';
+      const costFormula = 'prompt_tokens * 0.0005'
+        + ' + completion_tokens_details.reasoning_tokens * 0.00025'
+        + ' + prompt_tokens_details.audio_tokens * 0.01';
+      const estimatedContext = JSON.stringify({
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        prompt_tokens_details: { cached_tokens: 40, audio_tokens: null },
+        completion_tokens_details: { reasoning_tokens: 8 },
+      });
+      const validatedFormula = await variant.inject({
+        method: 'POST',
+        url: '/api/admin/prices/validate-formula',
+        headers: { cookie },
+        payload: {
+          accountId: 'acc_demo',
+          billingItemId: 'las_llm_seed-2.0-lite',
+          unit: 'request',
+          customerFormula,
+          costFormula,
+          billingContext: JSON.stringify({ BillingContext: estimatedContext }),
+        },
+      });
+      expect(validatedFormula.statusCode, validatedFormula.body).toBe(200);
+      expect(validatedFormula.json()).toMatchObject({
+        customerAmount: '0.148000',
+        costAmount: '0.052000',
+      });
+      const customerOnlyValidation = await variant.inject({
+        method: 'POST',
+        url: '/api/admin/prices/validate-formula',
+        headers: { cookie },
+        payload: {
+          accountId: 'acc_demo',
+          billingItemId: 'las_llm_seed-2.0-lite',
+          unit: 'request',
+          customerFormula,
+          billingContext: estimatedContext,
+        },
+      });
+      expect(customerOnlyValidation.statusCode, customerOnlyValidation.body).toBe(200);
+      expect(customerOnlyValidation.json()).toEqual({
+        success: true,
+        customerAmount: '0.148000',
+      });
+      const costOnlyValidation = await variant.inject({
+        method: 'POST',
+        url: '/api/admin/prices/validate-formula',
+        headers: { cookie },
+        payload: {
+          accountId: 'acc_demo',
+          billingItemId: 'las_llm_seed-2.0-lite',
+          unit: 'request',
+          costFormula,
+          billingContext: estimatedContext,
+        },
+      });
+      expect(costOnlyValidation.statusCode, costOnlyValidation.body).toBe(200);
+      expect(costOnlyValidation.json()).toEqual({
+        success: true,
+        costAmount: '0.052000',
+      });
+      const emptyFormulaValidation = await variant.inject({
+        method: 'POST',
+        url: '/api/admin/prices/validate-formula',
+        headers: { cookie },
+        payload: {
+          accountId: 'acc_demo',
+          billingItemId: 'las_llm_seed-2.0-lite',
+          unit: 'request',
+          customerFormula: '   ',
+          costFormula: null,
+          billingContext: estimatedContext,
+        },
+      });
+      expect(emptyFormulaValidation.statusCode, emptyFormulaValidation.body).toBe(400);
+      for (const formulaSide of ['customer', 'cost'] as const) {
+        const missingFormulaPrice = await variant.inject({
+          method: 'POST',
+          url: '/api/admin/prices',
+          headers: { cookie },
+          payload: {
+            accountId: 'acc_demo',
+            scopeType: 'CONFIG_GROUP',
+            scopeId: configGroupId,
+            billingItemId: 'las_llm_seed-2.0-lite',
+            unit: 'request',
+            customerPricingMode: formulaSide === 'customer' ? 'FORMULA' : 'UNIT',
+            customerUnitPrice: formulaSide === 'customer' ? '0' : '1',
+            customerPriceFormula: null,
+            costPricingMode: formulaSide === 'cost' ? 'FORMULA' : 'UNIT',
+            costUnitPrice: formulaSide === 'cost' ? '0' : '0.5',
+            costPriceFormula: null,
+          },
+        });
+        expect(missingFormulaPrice.statusCode, missingFormulaPrice.body).toBe(400);
+      }
+      const legacyValidationContract = await variant.inject({
+        method: 'POST',
+        url: '/api/admin/prices/validate-formula',
+        headers: { cookie },
+        payload: {
+          accountId: 'acc_demo',
+          billingItemId: 'las_llm_seed-2.0-lite',
+          unit: 'request',
+          formula: customerFormula,
+          billingContext: estimatedContext,
+        },
+      });
+      expect(legacyValidationContract.statusCode, legacyValidationContract.body).toBe(400);
+      const legacyPrefixValidation = await variant.inject({
+        method: 'POST',
+        url: '/api/admin/prices/validate-formula',
+        headers: { cookie },
+        payload: {
+          accountId: 'acc_demo',
+          billingItemId: 'las_llm_seed-2.0-lite',
+          unit: 'request',
+          customerFormula: 'a.prompt_tokens * 0.001',
+          billingContext: estimatedContext,
+        },
+      });
+      expect(legacyPrefixValidation.statusCode, legacyPrefixValidation.body).toBe(400);
+      expect(legacyPrefixValidation.json().code).toBe('INVALID_PRICE_FORMULA');
+      const missingFieldValidation = await variant.inject({
+        method: 'POST',
+        url: '/api/admin/prices/validate-formula',
+        headers: { cookie },
+        payload: {
+          accountId: 'acc_demo',
+          billingItemId: 'las_llm_seed-2.0-lite',
+          unit: 'request',
+          customerFormula: 'missing_tokens * 0.001',
+          billingContext: estimatedContext,
+        },
+      });
+      expect(missingFieldValidation.statusCode, missingFieldValidation.body).toBe(400);
+      expect(missingFieldValidation.json().code).toBe('PRICE_FORMULA_FIELD_MISSING');
+      const legacyPrefixPrice = await variant.inject({
+        method: 'POST',
+        url: '/api/admin/prices',
+        headers: { cookie },
+        payload: {
+          accountId: 'acc_demo',
+          scopeType: 'CONFIG_GROUP',
+          scopeId: configGroupId,
+          billingItemId: 'las_llm_seed-2.0-lite',
+          unit: 'request',
+          customerPricingMode: 'UNIT',
+          customerUnitPrice: '1',
+          customerPriceFormula: null,
+          costPricingMode: 'FORMULA',
+          costUnitPrice: '0',
+          costPriceFormula: 'a.prompt_tokens * 0.001',
+        },
+      });
+      expect(legacyPrefixPrice.statusCode, legacyPrefixPrice.body).toBe(400);
+      expect(legacyPrefixPrice.json().code).toBe('INVALID_PRICE_FORMULA');
+      const unsupportedFormulaItems = [
+        { billingItemId: 'image', unit: 'count' },
+        { billingItemId: 'video-second', unit: 'second' },
+        { billingItemId: 'ordinary-request', unit: 'request' },
+      ];
+      for (const unsupported of unsupportedFormulaItems) {
+        const unsupportedFormulaValidation = await variant.inject({
+          method: 'POST',
+          url: '/api/admin/prices/validate-formula',
+          headers: { cookie },
+          payload: {
+            accountId: 'acc_demo',
+            ...unsupported,
+            costFormula,
+            billingContext: estimatedContext,
+          },
+        });
+        expect(unsupportedFormulaValidation.statusCode, unsupportedFormulaValidation.body).toBe(400);
+        expect(unsupportedFormulaValidation.json().code)
+          .toBe('PRICE_FORMULA_UNSUPPORTED_BILLING_ITEM');
+
+        for (const formulaSide of ['customer', 'cost'] as const) {
+          const unsupportedFormulaPrice = await variant.inject({
+            method: 'POST',
+            url: '/api/admin/prices',
+            headers: { cookie },
+            payload: {
+              accountId: 'acc_demo',
+              scopeType: 'CONFIG_GROUP',
+              scopeId: configGroupId,
+              ...unsupported,
+              customerPricingMode: formulaSide === 'customer' ? 'FORMULA' : 'UNIT',
+              customerUnitPrice: formulaSide === 'customer' ? '0' : '1',
+              customerPriceFormula: formulaSide === 'customer' ? customerFormula : null,
+              costPricingMode: formulaSide === 'cost' ? 'FORMULA' : 'UNIT',
+              costUnitPrice: formulaSide === 'cost' ? '0' : '0.5',
+              costPriceFormula: formulaSide === 'cost' ? costFormula : null,
+            },
+          });
+          expect(unsupportedFormulaPrice.statusCode, unsupportedFormulaPrice.body).toBe(400);
+          expect(unsupportedFormulaPrice.json().code)
+            .toBe('PRICE_FORMULA_UNSUPPORTED_BILLING_ITEM');
+        }
+      }
+      const formulaPrice = await variant.inject({
+        method: 'POST',
+        url: '/api/admin/prices',
+        headers: { cookie },
+        payload: {
+          accountId: 'acc_demo',
+          scopeType: 'CONFIG_GROUP',
+          scopeId: configGroupId,
+          billingItemId: 'las_llm_seed-2.0-lite',
+          unit: 'request',
+          customerPricingMode: 'FORMULA',
+          customerUnitPrice: '0.7',
+          customerPriceFormula: customerFormula,
+          costPricingMode: 'FORMULA',
+          costUnitPrice: '0.3',
+          costPriceFormula: costFormula,
+        },
+      });
+      expect(formulaPrice.statusCode, formulaPrice.body).toBe(200);
+      const formulaList = await variant.inject({
+        url: `/api/admin/prices?accountId=acc_demo&scopeType=CONFIG_GROUP&scopeId=${configGroupId}`,
+        headers: { cookie },
+      });
+      expect(formulaList.statusCode, formulaList.body).toBe(200);
+      expect(formulaList.json().items.find((item: any) =>
+        item.billingItemId === 'las_llm_seed-2.0-lite'))
+        .toMatchObject({
+          customerPriceFormula: customerFormula,
+          costPriceFormula: costFormula,
+          formulaPricingSupported: true,
+        });
+      expect(formulaList.json().items.find((item: any) =>
+        item.billingItemId === 'openai_responses_gpt-5.6-sol'))
+        .toMatchObject({
+          unit: 'request',
+          source: 'CUSTOM_MODEL',
+          customerPriceFormula: null,
+          costPriceFormula: null,
+          formulaPricingSupported: true,
+        });
+      const platformCustomModelPrice = await variant.inject({
+        method: 'POST',
+        url: '/api/admin/prices',
+        headers: { cookie },
+        payload: {
+          accountId: 'acc_demo',
+          scopeType: 'PLATFORM',
+          scopeId: '*',
+          billingItemId: 'openai_responses_gpt-5.6-sol',
+          unit: 'request',
+          customerPricingMode: 'UNIT',
+          customerUnitPrice: '0.2',
+          customerPriceFormula: null,
+          costPricingMode: 'UNIT',
+          costUnitPrice: '0.1',
+          costPriceFormula: null,
+        },
+      });
+      expect(platformCustomModelPrice.statusCode, platformCustomModelPrice.body).toBe(200);
+      const plainGroup = await app.inject({
+        method: 'POST',
+        url: '/api/admin/config-groups',
+        headers: { cookie },
+        payload: {
+          accountId: 'acc_demo',
+          name: 'No custom model',
+          projectId: 'no-custom-model-project',
+          monthlyLimit: '1000',
+          isDefault: false,
+          resourceConfig: {
+            lasApiKey: 'plain-las',
+            arkApiKey: 'plain-ark',
+            tosBucketName: 'plain-bucket',
+          },
+        },
+      });
+      expect(plainGroup.statusCode, plainGroup.body).toBe(200);
+      const plainGroupPriceList = await variant.inject({
+        url: `/api/admin/prices?accountId=acc_demo&scopeType=CONFIG_GROUP&scopeId=${plainGroup.json().configGroupId}`,
+        headers: { cookie },
+      });
+      expect(plainGroupPriceList.statusCode, plainGroupPriceList.body).toBe(200);
+      expect(plainGroupPriceList.json().items.some((item: any) =>
+        item.billingItemId === 'openai_responses_gpt-5.6-sol')).toBe(false);
+      expect(formulaList.json().items.find((item: any) => item.billingItemId === 'image'))
+        .toMatchObject({
+          customerPriceFormula: null,
+          costPriceFormula: null,
+          formulaPricingSupported: false,
+        });
+      expect(formulaList.json().items.find((item: any) => item.billingItemId === 'video-second'))
+        .toMatchObject({ formulaPricingSupported: false });
+      expect(formulaList.json().items.find((item: any) =>
+        item.billingItemId === 'ordinary-request'))
+        .toMatchObject({ formulaPricingSupported: false });
+      const formulaCsvImport = await variant.inject({
+        method: 'POST',
+        url: '/api/admin/prices/import',
+        headers: { cookie },
+        payload: {
+          accountId: 'acc_demo',
+          scopeType: 'CONFIG_GROUP',
+          scopeId: configGroupId,
+          csv: 'billingItemId,unit,customerUnitPrice,costUnitPrice\nlas_llm_seed-2.0-lite,request,0.9,0.4\n',
+        },
+      });
+      expect(formulaCsvImport.statusCode, formulaCsvImport.body).toBe(200);
+      expect(formulaCsvImport.json()).toMatchObject({ total: 1, succeeded: 1, failed: 0 });
+      const afterFormulaCsvImport = await variant.inject({
+        url: `/api/admin/prices?accountId=acc_demo&scopeType=CONFIG_GROUP&scopeId=${configGroupId}`,
+        headers: { cookie },
+      });
+      expect(afterFormulaCsvImport.json().items.find((item: any) =>
+        item.billingItemId === 'las_llm_seed-2.0-lite'))
+        .toMatchObject({
+          customerUnitPrice: '0.9000000000',
+          costUnitPrice: '0.4000000000',
+          customerPriceFormula: customerFormula,
+          costPriceFormula: costFormula,
+        });
+      const formulaCsvOverwrite = await variant.inject({
+        method: 'POST',
+        url: '/api/admin/prices/import',
+        headers: { cookie },
+        payload: {
+          accountId: 'acc_demo',
+          scopeType: 'CONFIG_GROUP',
+          scopeId: configGroupId,
+          csv: 'billingItemId,unit,customerPricingMode,customerUnitPrice,customerPriceFormula,costPricingMode,costUnitPrice,costPriceFormula\n'
+            + 'las_llm_seed-2.0-lite,request,UNIT,1.1,,FORMULA,0.6,prompt_tokens * 0.0007\n',
+        },
+      });
+      expect(formulaCsvOverwrite.statusCode, formulaCsvOverwrite.body).toBe(200);
+      expect(formulaCsvOverwrite.json()).toMatchObject({ total: 1, succeeded: 1, failed: 0 });
+      const afterFormulaCsvOverwrite = await variant.inject({
+        url: `/api/admin/prices?accountId=acc_demo&scopeType=CONFIG_GROUP&scopeId=${configGroupId}`,
+        headers: { cookie },
+      });
+      expect(afterFormulaCsvOverwrite.json().items.find((item: any) =>
+        item.billingItemId === 'las_llm_seed-2.0-lite'))
+        .toMatchObject({
+          customerUnitPrice: '1.1000000000',
+          customerPriceFormula: null,
+          costUnitPrice: '0.6000000000',
+          costPriceFormula: 'prompt_tokens * 0.0007',
+        });
+      const restoredFormulaPrice = await variant.inject({
+        method: 'POST',
+        url: '/api/admin/prices',
+        headers: { cookie },
+        payload: {
+          accountId: 'acc_demo',
+          scopeType: 'CONFIG_GROUP',
+          scopeId: configGroupId,
+          billingItemId: 'las_llm_seed-2.0-lite',
+          unit: 'request',
+          customerPricingMode: 'FORMULA',
+          customerUnitPrice: '0.9',
+          customerPriceFormula: customerFormula,
+          costPricingMode: 'FORMULA',
+          costUnitPrice: '0.4',
+          costPriceFormula: costFormula,
+        },
+      });
+      expect(restoredFormulaPrice.statusCode, restoredFormulaPrice.body).toBe(200);
+      const customModelFormulaPrice = await variant.inject({
+        method: 'POST',
+        url: '/api/admin/prices',
+        headers: { cookie },
+        payload: {
+          accountId: 'acc_demo',
+          scopeType: 'CONFIG_GROUP',
+          scopeId: configGroupId,
+          billingItemId: 'openai_responses_gpt-5.6-sol',
+          unit: 'request',
+          customerPricingMode: 'FORMULA',
+          customerUnitPrice: '0',
+          customerPriceFormula: customerFormula,
+          costPricingMode: 'UNIT',
+          costUnitPrice: '0.1',
+          costPriceFormula: null,
+        },
+      });
+      expect(customModelFormulaPrice.statusCode, customModelFormulaPrice.body).toBe(200);
+      const customerFormulaOnlyList = await variant.inject({
+        url: `/api/admin/prices?accountId=acc_demo&scopeType=CONFIG_GROUP&scopeId=${configGroupId}`,
+        headers: { cookie },
+      });
+      expect(customerFormulaOnlyList.json().items.find((item: any) =>
+        item.billingItemId === 'openai_responses_gpt-5.6-sol'))
+        .toMatchObject({
+          customerPriceFormula: customerFormula,
+          costPriceFormula: null,
+        });
+      const customModelCostFormulaPrice = await variant.inject({
+        method: 'POST',
+        url: '/api/admin/prices',
+        headers: { cookie },
+        payload: {
+          accountId: 'acc_demo',
+          scopeType: 'CONFIG_GROUP',
+          scopeId: configGroupId,
+          billingItemId: 'openai_responses_gpt-5.6-sol',
+          unit: 'request',
+          customerPricingMode: 'UNIT',
+          customerUnitPrice: '1',
+          customerPriceFormula: null,
+          costPricingMode: 'FORMULA',
+          costUnitPrice: '0.1',
+          costPriceFormula: 'input_tokens * 0.0005'
+            + ' + output_tokens * 0.001'
+            + ' + input_tokens_details.cached_tokens * 0.0001',
+        },
+      });
+      expect(customModelCostFormulaPrice.statusCode, customModelCostFormulaPrice.body).toBe(200);
+      const costFormulaOnlyList = await variant.inject({
+        url: `/api/admin/prices?accountId=acc_demo&scopeType=CONFIG_GROUP&scopeId=${configGroupId}`,
+        headers: { cookie },
+      });
+      expect(costFormulaOnlyList.json().items.find((item: any) =>
+        item.billingItemId === 'openai_responses_gpt-5.6-sol'))
+        .toMatchObject({
+          customerPriceFormula: null,
+          costPriceFormula: 'input_tokens * 0.0005'
+            + ' + output_tokens * 0.001'
+            + ' + input_tokens_details.cached_tokens * 0.0001',
+        });
+      const customFormulaPrecheck = await variant.inject({
+        method: 'POST',
+        url: '/api/studio/baseline/tasks?connection_id=acc_demo',
+        headers,
+        payload: {
+          RequestId: 'custom-formula-price',
+          UserId: 'money-worker',
+          Items: [{
+            BillingItemId: 'openai_responses_gpt-5.6-sol',
+            Unit: 'request',
+            Usage: 1,
+            BillingContext: '{"request_count":1}',
+          }],
+        },
+      });
+      expect(customFormulaPrecheck.statusCode, customFormulaPrecheck.body).toBe(200);
+      const customFormulaEstimate = (await database.query<any>(
+        `SELECT estimated_amount, estimated_cost
+           FROM studio_tasks WHERE request_id = 'custom-formula-price'`,
+      ))[0];
+      expect(Number(customFormulaEstimate.estimated_amount)).toBe(1);
+      expect(Number(customFormulaEstimate.estimated_cost)).toBe(0.1);
+      const customFormulaCallback = await variant.inject({
+        method: 'POST',
+        url: '/api/studio/baseline/tasks/callback?connection_id=acc_demo',
+        headers,
+        payload: {
+          RequestId: 'custom-formula-price',
+          UserId: 'money-worker',
+          Status: 'SUCCEEDED',
+          Items: [{
+            BillingItemId: 'openai_responses_gpt-5.6-sol',
+            Unit: 'request',
+            Usage: 1,
+            BillingContext: JSON.stringify({
+              input_tokens: 200,
+              output_tokens: 30,
+              input_tokens_details: { cached_tokens: 50 },
+            }),
+          }],
+        },
+      });
+      expect(customFormulaCallback.statusCode, customFormulaCallback.body).toBe(200);
+      const customFormulaSettled = (await database.query<any>(
+        `SELECT actual_amount, actual_cost
+           FROM studio_tasks WHERE request_id = 'custom-formula-price'`,
+      ))[0];
+      expect(Number(customFormulaSettled.actual_amount)).toBe(1);
+      expect(Number(customFormulaSettled.actual_cost)).toBe(0.135);
+      const formulaPrecheck = await variant.inject({
+        method: 'POST',
+        url: '/api/studio/baseline/tasks?connection_id=acc_demo',
+        headers,
+        payload: {
+          RequestId: 'formula-price',
+          UserId: 'money-worker',
+          Items: [{
+            BillingItemId: 'las_llm_seed-2.0-lite',
+            Unit: 'request',
+            Usage: 1,
+            BillingContext: estimatedContext,
+          }],
+        },
+      });
+      expect(formulaPrecheck.statusCode, formulaPrecheck.body).toBe(200);
+      const estimatedFormulaTask = (await database.query<any>(
+        `SELECT t.estimated_amount, t.estimated_cost,
+                i.customer_price_formula, i.cost_price_formula,
+                i.estimated_customer_amount, i.estimated_cost_amount
+           FROM studio_tasks t
+           JOIN studio_task_items i ON i.task_id = t.task_id
+          WHERE t.request_id = 'formula-price'`,
+      ))[0];
+      expect(Number(estimatedFormulaTask.estimated_amount)).toBe(0.148);
+      expect(Number(estimatedFormulaTask.estimated_cost)).toBe(0.052);
+      expect(Number(estimatedFormulaTask.estimated_customer_amount)).toBe(0.148);
+      expect(Number(estimatedFormulaTask.estimated_cost_amount)).toBe(0.052);
+      expect(estimatedFormulaTask.customer_price_formula).toBe(customerFormula);
+      expect(estimatedFormulaTask.cost_price_formula).toBe(costFormula);
+      const changedFormulaPrice = await variant.inject({
+        method: 'POST',
+        url: '/api/admin/prices',
+        headers: { cookie },
+        payload: {
+          accountId: 'acc_demo',
+          scopeType: 'CONFIG_GROUP',
+          scopeId: configGroupId,
+          billingItemId: 'las_llm_seed-2.0-lite',
+          unit: 'request',
+          customerPricingMode: 'FORMULA',
+          customerUnitPrice: '0.9',
+          customerPriceFormula: 'total_tokens * 9',
+          costPricingMode: 'FORMULA',
+          costUnitPrice: '0.4',
+          costPriceFormula: 'total_tokens * 8',
+        },
+      });
+      expect(changedFormulaPrice.statusCode, changedFormulaPrice.body).toBe(200);
+      const formulaCallback = await variant.inject({
+        method: 'POST',
+        url: '/api/studio/baseline/tasks/callback?connection_id=acc_demo',
+        headers,
+        payload: {
+          RequestId: 'formula-price',
+          UserId: 'money-worker',
+          Status: 'SUCCEEDED',
+          Items: [{
+            BillingItemId: 'las_llm_seed-2.0-lite',
+            Unit: 'request',
+            Usage: 1,
+            BillingContext: JSON.stringify({
+              prompt_tokens: 200,
+              completion_tokens: 30,
+              prompt_tokens_details: { cached_tokens: 50, audio_tokens: null },
+              completion_tokens_details: { reasoning_tokens: 20 },
+            }),
+          }],
+        },
+      });
+      expect(formulaCallback.statusCode, formulaCallback.body).toBe(200);
+      const settledFormula = (await database.query<any>(
+        `SELECT t.actual_amount, t.actual_cost,
+                i.actual_customer_amount, i.actual_cost_amount,
+                i.customer_price_formula, i.cost_price_formula
+           FROM studio_tasks t JOIN studio_task_items i ON i.task_id = t.task_id
+          WHERE t.request_id = 'formula-price'`,
+      ))[0];
+      expect(Number(settledFormula.actual_amount)).toBe(0.34);
+      expect(Number(settledFormula.actual_cost)).toBe(0.105);
+      expect(Number(settledFormula.actual_customer_amount)).toBe(0.34);
+      expect(Number(settledFormula.actual_cost_amount)).toBe(0.105);
+      expect(settledFormula.customer_price_formula).toBe(customerFormula);
+      expect(settledFormula.cost_price_formula).toBe(costFormula);
+      const formulaFallbackPrecheck = await variant.inject({
+        method: 'POST',
+        url: '/api/studio/baseline/tasks?connection_id=acc_demo',
+        headers,
+        payload: {
+          RequestId: 'formula-fallback',
+          UserId: 'money-worker',
+          Items: [{
+            BillingItemId: 'las_llm_seed-2.0-lite',
+            Unit: 'request',
+            Usage: 1,
+            BillingContext: estimatedContext,
+          }],
+        },
+      });
+      expect(formulaFallbackPrecheck.statusCode, formulaFallbackPrecheck.body).toBe(200);
+      const formulaFallbackCallback = await variant.inject({
+        method: 'POST',
+        url: '/api/studio/baseline/tasks/callback?connection_id=acc_demo',
+        headers,
+        payload: {
+          RequestId: 'formula-fallback',
+          UserId: 'money-worker',
+          Status: 'SUCCEEDED',
+          Items: [{
+            BillingItemId: 'las_llm_seed-2.0-lite',
+            Unit: 'request',
+            Usage: 1,
+            BillingContext: '{"request_count":1}',
+          }],
+        },
+      });
+      expect(formulaFallbackCallback.statusCode, formulaFallbackCallback.body).toBe(200);
+      const fallbackSettled = (await database.query<any>(
+        `SELECT status, actual_amount, actual_cost
+           FROM studio_tasks WHERE request_id = 'formula-fallback'`,
+      ))[0];
+      expect(fallbackSettled.status).toBe('SUCCEEDED');
+      expect(Number(fallbackSettled.actual_amount)).toBe(0.9);
+      expect(Number(fallbackSettled.actual_cost)).toBe(0.4);
       const reconciler = new BillingReconciler(database, new StudioConnectionService(database, deployment, new StudioAdminClient()), new BillingService(database, deployment));
       await database.execute("UPDATE studio_tasks SET created_at = ?, next_reconcile_at = ? WHERE status = 'RUNNING'", [new Date(Date.now() - 20 * 60_000), new Date(Date.now() + 60_000)]);
       expect((await reconciler.reconcile({ olderThanMinutes: 10, limit: 10 })).scanned).toBe(0);
@@ -322,7 +946,7 @@ describe('studio-login MVP', () => {
       expect(usageResponse.json().items.map((item: any) => item.requestId)).toEqual(['group-price']);
       expect(usageResponse.json().items[0].createdAt).toBe('2026-09-01T07:00:00.000Z');
     } finally { await variant.close(); }
-  });
+  }, 30_000);
 
   it('页面提供登录、管理工作台和运行时连接配置入口', async () => {
     const page = await app.inject({ method: 'GET', url: '/' });
@@ -331,6 +955,8 @@ describe('studio-login MVP', () => {
     expect(page.body).toContain('资源配置组');
     expect(page.body).toContain('企业子账号');
     expect(page.body).toContain('Studio 服务连接');
+    expect(page.body).toContain('按 BillingContext 公式');
+    expect(page.body).toContain('校验并试算');
     expect(page.body).toContain('保存并注册');
     expect(page.body).toContain('完整资源配置');
     expect(page.body).toContain('图形验证码');
@@ -351,22 +977,43 @@ describe('studio-login MVP', () => {
     })).statusCode).toBe(401);
   });
 
-  it('按客户端 IP 限制验证码获取和登录请求', async () => {
-    for (let attempt = 0; attempt < 30; attempt++) {
-      const response = await app.inject({ url: '/api/auth/captcha' });
+  it('验证码获取不做业务限流，密码尝试仍按账号限制', async () => {
+    const firstCaptcha = await app.inject({ url: '/api/auth/captcha' });
+    expect(firstCaptcha.statusCode).toBe(200);
+    const clientCookie = cookieFrom(firstCaptcha.headers);
+    for (let attempt = 1; attempt < 35; attempt++) {
+      const response = await app.inject({
+        url: '/api/auth/captcha',
+        headers: { cookie: clientCookie },
+      });
       expect(response.statusCode).toBe(200);
     }
-    expect((await app.inject({ url: '/api/auth/captcha' })).statusCode).toBe(429);
 
-    for (let attempt = 0; attempt < 60; attempt++) {
+    for (let attempt = 0; attempt < 10; attempt++) {
       const response = await app.inject({
-        method: 'POST', url: '/api/auth/login', payload: {},
+        method: 'POST',
+        url: '/api/auth/login',
+        payload: {
+          accountId: 'acc_demo',
+          loginName: 'root',
+          password: 'wrong-password',
+          ...await captchaFields(),
+        },
       });
-      expect(response.statusCode).toBe(400);
+      expect(response.statusCode).toBe(401);
     }
-    expect((await app.inject({
-      method: 'POST', url: '/api/auth/login', payload: {},
-    })).statusCode).toBe(429);
+    const limitedLogin = await app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: {
+        accountId: 'acc_demo',
+        loginName: 'root',
+        password: 'wrong-password',
+        ...await captchaFields(),
+      },
+    });
+    expect(limitedLogin.statusCode).toBe(429);
+    expect(Number(limitedLogin.headers['retry-after'])).toBeGreaterThan(0);
   });
 
   it('无公网地址时正常启动，并由 SYSTEM_ADMIN 在运行时完成 Studio 注册', async () => {
@@ -434,6 +1081,118 @@ describe('studio-login MVP', () => {
     });
     expect(retried.statusCode).toBe(200);
     expect(studioCalls).toContain('/integration/api/v1/app-ticket-configs/register');
+  });
+
+  it('通过环境变量将指定 Project 的配置组改为只读', async () => {
+    const adminCookie = await login('acc_demo', 'root', 'StrongPass123!');
+    expect((await configureStudio(adminCookie)).statusCode).toBe(200);
+
+    const group = await app.inject({
+      method: 'POST',
+      url: '/api/admin/config-groups',
+      headers: { cookie: adminCookie },
+      payload: {
+        accountId: 'acc_demo',
+        projectId: 'locked_project_alpha',
+        monthlyLimit: '1000',
+        isDefault: true,
+        projectLevelSharing: false,
+        resourceConfig: {
+          lasApiKey: 'las-secret',
+          arkApiKey: 'ark-secret',
+          tosBucketName: 'studio-login-test',
+        },
+      },
+    });
+    expect(group.statusCode).toBe(200);
+    const configGroupId = group.json().configGroupId as string;
+
+    const readonlyConfig = loadConfig({
+      APP_ENV: 'test',
+      STUDIO_LOGIN_DATABASE_URL: testUrl,
+      STUDIO_LOGIN_ACCOUNT_ID: 'acc_demo',
+      STUDIO_LOGIN_ADMIN_USERNAME: 'root',
+      STUDIO_LOGIN_ADMIN_PASSWORD: 'StrongPass123!',
+      LAS_STUDIO_INTEGRATION_TOKEN: integrationToken,
+      STUDIO_LOGIN_READONLY_CONFIG_GROUP_PROJECT_IDS: 'locked_project_alpha,locked_project_beta',
+    });
+    const readonlyApp = await buildApp({
+      config: readonlyConfig,
+      database,
+      captchaAnswerFactory: () => 'ABCDE',
+    });
+    try {
+      const list = await readonlyApp.inject({
+        method: 'GET',
+        url: '/api/admin/config-groups?accountId=acc_demo',
+        headers: { cookie: adminCookie },
+      });
+      expect(list.statusCode).toBe(200);
+      expect(list.json().items[0]).toMatchObject({
+        projectId: 'locked_project_alpha',
+        readOnly: true,
+      });
+
+      const createLocked = await readonlyApp.inject({
+        method: 'POST',
+        url: '/api/admin/config-groups',
+        headers: { cookie: adminCookie },
+        payload: {
+          accountId: 'acc_demo',
+          projectId: 'locked_project_beta',
+          monthlyLimit: null,
+          isDefault: false,
+          projectLevelSharing: true,
+          resourceConfig: {
+            lasApiKey: 'new-las',
+            arkApiKey: 'new-ark',
+            tosBucketName: 'new-bucket',
+          },
+        },
+      });
+      expect(createLocked.statusCode).toBe(403);
+      expect(createLocked.json()).toMatchObject({
+        code: 'CONFIG_GROUP_READ_ONLY',
+        messageKey: 'groups.readOnly',
+      });
+
+      const updateLocked = await readonlyApp.inject({
+        method: 'PUT',
+        url: `/api/admin/config-groups/${configGroupId}`,
+        headers: { cookie: adminCookie },
+        payload: {
+          accountId: 'acc_demo',
+          resourceConfig: {
+            lasApiKey: 'las-next',
+            arkApiKey: 'ark-next',
+            tosBucketName: 'bucket-next',
+          },
+          monthlyLimit: '1200',
+          projectLevelSharing: true,
+        },
+      });
+      expect(updateLocked.statusCode).toBe(403);
+      expect(updateLocked.json()).toMatchObject({ code: 'CONFIG_GROUP_READ_ONLY' });
+
+      const publishLocked = await readonlyApp.inject({
+        method: 'POST',
+        url: `/api/admin/config-groups/${configGroupId}/publish`,
+        headers: { cookie: adminCookie },
+        payload: { accountId: 'acc_demo' },
+      });
+      expect(publishLocked.statusCode).toBe(403);
+      expect(publishLocked.json()).toMatchObject({ code: 'CONFIG_GROUP_READ_ONLY' });
+
+      const deleteLocked = await readonlyApp.inject({
+        method: 'DELETE',
+        url: `/api/admin/config-groups/${configGroupId}?accountId=acc_demo`,
+        headers: { cookie: adminCookie },
+      });
+      expect(deleteLocked.statusCode).toBe(403);
+      expect(deleteLocked.json()).toMatchObject({ code: 'CONFIG_GROUP_READ_ONLY' });
+    } finally {
+      await readonlyApp.close();
+    }
   });
 
   it('完成 Studio 注册、配置同步、Ticket 和后付费闭环', async () => {

@@ -23,7 +23,11 @@ import {
 } from './billing.js';
 import type { AppConfig } from './config.js';
 import { ConfigGroupService } from './config-groups.js';
-import { derivedCustomBillingCatalog } from './custom-billing-items.js';
+import {
+  customBillingCatalogForScope,
+  derivedCustomBillingCatalog,
+  supportsBillingContextPriceFormula,
+} from './custom-billing-items.js';
 import { importCsvRows, parseCsvRecords } from './csv-import.js';
 import type { Database } from './db.js';
 import { AppError } from './errors.js';
@@ -34,6 +38,7 @@ import { assertRateLimit } from './rate-limit.js';
 import { StudioAdminClient } from './studio-client.js';
 import { StudioConnectionService } from './studio-connections.js';
 import { TicketService } from './tickets.js';
+import { evaluatePriceFormula } from './price-formula.js';
 
 const loginSchema = z.object({
   accountId: z.string().min(1).max(64).optional(),
@@ -77,6 +82,12 @@ const nonNegativeAmount = z.union([z.string(), z.number()])
 const priceAmount = z.union([z.string(), z.number()])
   .transform(String)
   .refine(value => /^\d+(?:\.\d{1,10})?$/.test(value), 'validation.pricePrecision');
+
+const optionalPricingMode = z.preprocess(value => {
+  if (value === undefined || value === null) return undefined;
+  const normalized = String(value).trim().toUpperCase();
+  return normalized || undefined;
+}, z.enum(['UNIT', 'FORMULA']).optional());
 
 const optionalAmount = nonNegativeAmount.nullable().optional()
   .transform(value => value === null || value === undefined ? null : String(value));
@@ -147,8 +158,27 @@ const priceSchema = z.object({
   scopeId: z.string().min(1).max(64),
   billingItemId: z.string().min(1).max(128),
   unit: z.string().min(1).max(32),
+  customerPricingMode: z.enum(['UNIT', 'FORMULA']).default('UNIT'),
+  costPricingMode: z.enum(['UNIT', 'FORMULA']).default('UNIT'),
   customerUnitPrice: priceAmount,
+  customerPriceFormula: z.string().max(2000).nullable().optional(),
   costUnitPrice: priceAmount,
+  costPriceFormula: z.string().max(2000).nullable().optional(),
+}).superRefine((value, context) => {
+  if (value.customerPricingMode === 'FORMULA' && !value.customerPriceFormula?.trim()) {
+    context.addIssue({
+      code: 'custom',
+      path: ['customerPriceFormula'],
+      message: 'pricing.formulaRequired',
+    });
+  }
+  if (value.costPricingMode === 'FORMULA' && !value.costPriceFormula?.trim()) {
+    context.addIssue({
+      code: 'custom',
+      path: ['costPriceFormula'],
+      message: 'pricing.formulaRequired',
+    });
+  }
 });
 
 const csvImportSchema = z.object({
@@ -183,8 +213,33 @@ const priceCsvRowSchema = z.object({
   unit: z.string().min(1).max(32),
   configGroup: z.string().max(128).optional(),
   customerUnitPrice: priceAmount,
+  customerPricingMode: optionalPricingMode,
+  customerPriceFormula: z.string().max(2000).optional(),
   costUnitPrice: priceAmount,
+  costPricingMode: optionalPricingMode,
+  costPriceFormula: z.string().max(2000).optional(),
 }).passthrough();
+
+function csvCell(value: unknown): string {
+  const text = String(value ?? '');
+  return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+function importedPriceFormula(
+  mode: 'UNIT' | 'FORMULA' | undefined,
+  formula: string | undefined,
+  existingFormula: string | null | undefined,
+): string | null | undefined {
+  const normalizedFormula = formula?.trim();
+  if (mode === 'FORMULA' || (!mode && normalizedFormula)) {
+    if (!normalizedFormula) {
+      throw new AppError(message('pricing.formulaRequired'), 400, 'PRICE_FORMULA_REQUIRED');
+    }
+    return normalizedFormula;
+  }
+  if (mode === 'UNIT') return null;
+  return existingFormula;
+}
 
 const baselineItemSchema = z.object({
   BillingItemId: z.string().min(1).max(128),
@@ -218,6 +273,12 @@ function validRequestId(value: string | undefined): string | undefined {
   const requestId = value?.trim();
   if (!requestId || requestId.length > 128) return undefined;
   return /^[A-Za-z0-9._:-]+$/.test(requestId) ? requestId : undefined;
+}
+
+function secureRequest(request: FastifyRequest, config: AppConfig): boolean {
+  return config.APP_ENV === 'production'
+    || request.protocol === 'https'
+    || headerValue(request.headers['x-forwarded-proto']) === 'https';
 }
 
 const customImageSizes: Record<string, string> = {
@@ -424,6 +485,14 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
       };
       if (error.statusCode >= 500) request.log.error(logContext, 'request failed');
       else request.log.warn(logContext, 'request rejected');
+      if (error.statusCode === 429) {
+        const retryAfterSeconds = Number(
+          (error.details as { retryAfterSeconds?: unknown } | undefined)?.retryAfterSeconds,
+        );
+        if (Number.isInteger(retryAfterSeconds) && retryAfterSeconds > 0) {
+          reply.header('retry-after', String(retryAfterSeconds));
+        }
+      }
       void reply.status(error.statusCode).send({
         code: error.code,
         message: error.localize(locale),
@@ -455,7 +524,11 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
 
   app.get('/api/runtime-config', async (_request, reply) => {
     reply.header('cache-control', 'no-store');
-    return { currency: config.STUDIO_LOGIN_CURRENCY, timeZone: config.timeZone, defaultPrices: config.defaultPrices };
+    return {
+      currency: config.STUDIO_LOGIN_CURRENCY,
+      timeZone: config.timeZone,
+      defaultPrices: config.defaultPrices,
+    };
   });
 
   app.get('/health', async () => ({ status: 'ok' }));
@@ -499,14 +572,11 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
 
   app.get('/api/auth/captcha', async (request, reply) => {
     reply.header('cache-control', 'no-store');
-    return captcha.issue(requestIp(request));
+    return captcha.issue();
   });
 
   app.post('/api/auth/login', async (request, reply) => {
     const clientIp = requestIp(request);
-    await assertRateLimit(database, {
-      action: 'login-ip', subject: clientIp, limit: 60, windowMs: 10 * 60 * 1000,
-    });
     const body = loginSchema.parse(request.body);
     await captcha.verify(body.captchaToken, body.captchaCode);
     const session = await auth.login({
@@ -517,9 +587,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     reply.setCookie(SESSION_COOKIE_NAME, session.token, {
       httpOnly: true,
       sameSite: 'lax',
-      secure: config.APP_ENV === 'production'
-        || request.protocol === 'https'
-        || headerValue(request.headers['x-forwarded-proto']) === 'https',
+      secure: secureRequest(request, config),
       path: '/',
       expires: new Date(session.expiresAt),
     });
@@ -773,8 +841,79 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     if (actor.role !== 'SYSTEM_ADMIN') {
       throw new AppError(message('pricing.systemAdminRequired'), 403, 'SYSTEM_ADMIN_REQUIRED');
     }
-    await billing.upsertPrice({ ...body, actor });
+    const formulaRequested = body.customerPricingMode === 'FORMULA'
+      || body.costPricingMode === 'FORMULA';
+    const [catalog, customCatalog] = formulaRequested
+      ? await Promise.all([
+          studioConnections.billingCatalog(actor.accountId),
+          derivedCustomBillingCatalog(database, config, actor.accountId),
+        ])
+      : [[], []];
+    const scopedCustomCatalog = customBillingCatalogForScope(customCatalog, body.scopeType, body.scopeId);
+    const formulaPricingSupported = supportsBillingContextPriceFormula(
+      body.billingItemId,
+      body.unit,
+      catalog,
+      scopedCustomCatalog,
+    );
+    await billing.upsertPrice({
+      ...body,
+      customerPriceFormula: body.customerPricingMode === 'FORMULA'
+        ? body.customerPriceFormula
+        : null,
+      costPriceFormula: body.costPricingMode === 'FORMULA'
+        ? body.costPriceFormula
+        : null,
+      formulaPricingSupported,
+      actor,
+    });
     return { success: true };
+  });
+
+  app.post('/api/admin/prices/validate-formula', async request => {
+    const body = z.object({
+      accountId: z.string().min(1).max(64),
+      billingItemId: z.string().min(1).max(128),
+      unit: z.string().min(1).max(32),
+      scopeType: z.enum(['CONFIG_GROUP', 'PLATFORM']).optional(),
+      scopeId: z.string().min(1).max(64).optional(),
+      customerFormula: z.string().max(2000).nullable().optional(),
+      costFormula: z.string().max(2000).nullable().optional(),
+      billingContext: z.unknown(),
+    }).superRefine((value, context) => {
+      if (!value.customerFormula?.trim() && !value.costFormula?.trim()) {
+        context.addIssue({
+          code: 'custom',
+          path: ['customerFormula'],
+          message: 'pricing.formulaRequired',
+        });
+      }
+    }).parse(request.body);
+    const actor = await auth.requireAdmin(request, body.accountId);
+    if (actor.role !== 'SYSTEM_ADMIN') {
+      throw new AppError(message('pricing.systemAdminRequired'), 403, 'SYSTEM_ADMIN_REQUIRED');
+    }
+    const [catalog, customCatalog] = await Promise.all([
+      studioConnections.billingCatalog(actor.accountId),
+      derivedCustomBillingCatalog(database, config, actor.accountId),
+    ]);
+    const scopedCustomCatalog = body.scopeType && body.scopeId
+      ? customBillingCatalogForScope(customCatalog, body.scopeType, body.scopeId)
+      : [];
+    if (!supportsBillingContextPriceFormula(body.billingItemId, body.unit, catalog, scopedCustomCatalog)) {
+      throw new AppError(
+        message('pricing.formulaUnsupportedBillingItem'),
+        400,
+        'PRICE_FORMULA_UNSUPPORTED_BILLING_ITEM',
+      );
+    }
+    const customerAmount = body.customerFormula?.trim()
+      ? evaluatePriceFormula(body.customerFormula, body.billingContext).toFixed(6)
+      : undefined;
+    const costAmount = body.costFormula?.trim()
+      ? evaluatePriceFormula(body.costFormula, body.billingContext).toFixed(6)
+      : undefined;
+    return { success: true, customerAmount, costAmount };
   });
 
   app.get('/api/admin/prices', async request => {
@@ -800,6 +939,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     ]);
     const configured = configuredResult.items;
     const platformPrices = platformResult.items;
+    const scopedCustomCatalog = customBillingCatalogForScope(customCatalog, query.scopeType, query.scopeId);
     const platformByItem = new Map(platformPrices.map(item => [
       `${item.billingItemId}\0${item.unit}`,
       item,
@@ -808,7 +948,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     for (const item of catalog) {
       mergedCatalog.set(`${item.billingItemId}\0${item.unit}`, { ...item, custom: false });
     }
-    for (const item of customCatalog) {
+    for (const item of scopedCustomCatalog) {
       mergedCatalog.set(`${item.billingItemId}\0${item.unit}`, { ...item });
     }
     const catalogItems = [...mergedCatalog.values()].sort((left, right) =>
@@ -830,7 +970,9 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
         billingItemId: catalogItem.billingItemId,
         unit: catalogItem.unit,
         customerUnitPrice: config.defaultPrices.customerUnitPrice,
+        customerPriceFormula: null,
         costUnitPrice: config.defaultPrices.costUnitPrice,
+        costPriceFormula: null,
         enabled: false,
         configured: false,
         builtinDefault: true,
@@ -852,27 +994,26 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
         custom: true,
       });
     }
-    for (const item of platformPrices) {
-      const key = `${item.billingItemId}\0${item.unit}`;
-      if (catalogKeys.has(key) || configured.some(current => `${current.billingItemId}\0${current.unit}` === key)) {
-        continue;
-      }
-      items.push({
-        ...item,
-        operatorIds: [],
-        connectionNames: [],
-        configured: false,
-        inherited: true,
-        custom: true,
-      });
-    }
+    const visibleItems: Array<Record<string, unknown>> = items.map(item => ({
+      ...item,
+      formulaPricingSupported: supportsBillingContextPriceFormula(
+        String(item.billingItemId),
+        String(item.unit),
+        catalog,
+        scopedCustomCatalog,
+      ),
+    }));
     return {
       scopeType: query.scopeType,
       scopeId: query.scopeId,
       scopeName: configuredResult.scopeName,
       items: actor.role === 'SYSTEM_ADMIN'
-        ? items
-        : items.map(({ costUnitPrice: _costUnitPrice, ...item }) => item),
+        ? visibleItems
+        : visibleItems.map(({
+            costUnitPrice: _costUnitPrice,
+            costPriceFormula: _costPriceFormula,
+            ...item
+          }) => item),
     };
   });
 
@@ -932,29 +1073,41 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
       derivedCustomBillingCatalog(database, config, actor.accountId),
       billing.listPrices(actor.accountId, scopeType, scopeId),
     ]);
+    const scopedCustomCatalog = customBillingCatalogForScope(customCatalog, scopeType, scopeId);
     const configured = new Map(configuredResult.items.map(item => {
       const price = item as {
         billingItemId: string;
         unit: string;
         customerUnitPrice: string;
+        customerPriceFormula: string | null;
         costUnitPrice: string;
+        costPriceFormula: string | null;
       };
       return [`${price.billingItemId}\0${price.unit}`, price];
     }));
     const merged = new Map<string, { billingItemId: string; unit: string }>();
     for (const item of catalog) merged.set(`${item.billingItemId}\0${item.unit}`, item);
-    for (const item of customCatalog) merged.set(`${item.billingItemId}\0${item.unit}`, item);
+    for (const item of scopedCustomCatalog) merged.set(`${item.billingItemId}\0${item.unit}`, item);
     for (const item of configured.values()) merged.set(`${item.billingItemId}\0${item.unit}`, item);
     const rows = [...merged.values()]
       .map(item => {
         const price = configured.get(`${item.billingItemId}\0${item.unit}`);
-        return `${item.billingItemId},${item.unit},${price?.customerUnitPrice ?? config.defaultPrices.customerUnitPrice},${price?.costUnitPrice ?? config.defaultPrices.costUnitPrice}`;
+        return [
+          item.billingItemId,
+          item.unit,
+          price?.customerPriceFormula ? 'FORMULA' : 'UNIT',
+          price?.customerUnitPrice ?? config.defaultPrices.customerUnitPrice,
+          price?.customerPriceFormula ?? '',
+          price?.costPriceFormula ? 'FORMULA' : 'UNIT',
+          price?.costUnitPrice ?? config.defaultPrices.costUnitPrice,
+          price?.costPriceFormula ?? '',
+        ].map(csvCell).join(',');
       })
       .join('\n');
     return reply
       .type('text/csv; charset=utf-8')
       .header('content-disposition', 'attachment; filename="studio-prices.csv"')
-      .send(`\uFEFFbillingItemId,unit,customerUnitPrice,costUnitPrice\n${rows}\n`);
+      .send(`\uFEFFbillingItemId,unit,customerPricingMode,customerUnitPrice,customerPriceFormula,costPricingMode,costUnitPrice,costPriceFormula\n${rows}\n`);
   });
 
   app.post('/api/admin/prices/import', async request => {
@@ -969,20 +1122,49 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
     if (body.scopeType === 'CONFIG_GROUP') {
       await configGroups.resolveAvailableGroupId(body.accountId, body.scopeId);
     }
-    const [catalog, customCatalog] = await Promise.all([
+    const [catalog, customCatalog, configuredResult] = await Promise.all([
       studioConnections.billingCatalog(actor.accountId).catch(() => []),
       derivedCustomBillingCatalog(database, config, actor.accountId),
+      billing.listPrices(actor.accountId, body.scopeType, body.scopeId),
     ]);
+    const scopedCustomCatalog = customBillingCatalogForScope(customCatalog, body.scopeType, body.scopeId);
     const supported = new Set([
       ...catalog.map(item => `${item.billingItemId}\0${item.unit}`),
-      ...customCatalog.map(item => `${item.billingItemId}\0${item.unit}`),
+      ...scopedCustomCatalog.map(item => `${item.billingItemId}\0${item.unit}`),
     ]);
+    const configured = new Map(configuredResult.items.map(item => {
+      const price = item as {
+        billingItemId: string;
+        unit: string;
+        customerPriceFormula: string | null;
+        costPriceFormula: string | null;
+      };
+      return [`${price.billingItemId}\0${price.unit}`, price];
+    }));
     const rows = parseCsvRecords(body.csv);
     return importCsvRows(rows, async row => {
       const parsed = priceCsvRowSchema.parse(row);
-      if (!supported.has(`${parsed.billingItemId}\0${parsed.unit}`)) {
+      const key = `${parsed.billingItemId}\0${parsed.unit}`;
+      if (!supported.has(key)) {
         return message('csv.unknownBillingItemSkipped');
       }
+      const existing = configured.get(key);
+      const formulaPricingSupported = supportsBillingContextPriceFormula(
+        parsed.billingItemId,
+        parsed.unit,
+        catalog,
+        scopedCustomCatalog,
+      );
+      const customerPriceFormula = importedPriceFormula(
+        parsed.customerPricingMode,
+        parsed.customerPriceFormula,
+        existing?.customerPriceFormula,
+      );
+      const costPriceFormula = importedPriceFormula(
+        parsed.costPricingMode,
+        parsed.costPriceFormula,
+        existing?.costPriceFormula,
+      );
       await billing.upsertPrice({
         accountId: body.accountId,
         scopeType: body.scopeType,
@@ -990,7 +1172,10 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
         billingItemId: parsed.billingItemId,
         unit: parsed.unit,
         customerUnitPrice: parsed.customerUnitPrice,
+        customerPriceFormula,
         costUnitPrice: parsed.costUnitPrice,
+        costPriceFormula,
+        formulaPricingSupported,
         actor,
       });
       return message('csv.saved');

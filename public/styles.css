@@ -30,6 +30,7 @@ input:disabled, select:disabled, textarea:disabled, input[readonly], textarea[re
 .captcha-row { display: flex; align-items: center; gap: 8px; }
 .captcha-row input { min-width: 0; flex: 1; text-transform: uppercase; }
 .captcha-row img { width: 152px; height: 52px; border: 1px solid #d9d5ce; border-radius: 8px; background: #f5f1e8; }
+.captcha-row img.captcha-unavailable { visibility: hidden; }
 .captcha-row button { flex: none; padding: 0 9px; font-size: 12px; }
 .password-rule { color: #625f59; font-size: 12px; line-height: 1.5; }
 .password-feedback { color: #24714d; font-size: 12px; line-height: 1.5; }
@@ -38,6 +39,8 @@ input:disabled, select:disabled, textarea:disabled, input[readonly], textarea[re
 .primary, .secondary { min-height: 44px; padding: 0 18px; border-radius: 9px; border: 1px solid #1c1c1a; cursor: pointer; font-weight: 680; }
 .primary { color: white; background: #1c1c1a; }
 .primary:hover { background: #34342f; }
+button:disabled { color: #9b968e; background: #ebe8e2; border-color: #ddd8cf; cursor: not-allowed; }
+button:disabled:hover { color: #9b968e; background: #ebe8e2; border-color: #ddd8cf; }
 .secondary { color: #1c1c1a; background: white; }
 .compact { min-height: 38px; }
 .message { min-height: 20px; margin: 14px 0 0; color: #24714d; font-size: 13px; line-height: 1.5; }
@@ -188,7 +191,32 @@ tbody tr:last-child td { border-bottom: 0; }
 .dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .dialog-heading { flex: 1; min-width: 0; }
 .dialog-header > .icon-button { flex: none; }
-#price-form label, #price-form input { min-width: 0; }
+#price-form label, #price-form input, #price-form textarea { min-width: 0; }
+.price-config-fields { display: grid; gap: 17px; }
+.price-config-section { display: grid; gap: 13px; }
+.price-config-section h3 { margin: 0; font-size: 14px; }
+.price-config-fields.formula-enabled .price-config-section { padding: 15px; border: 1px solid #e4e0d8; border-radius: 12px; background: #fbfaf8; }
+.price-config-fields:not(.formula-enabled) .price-formula-control { display: none; }
+.price-mode-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; padding: 5px; border-radius: 10px; background: #efede8; }
+.price-mode-tab { min-height: 38px; padding: 0 12px; border: 0; border-radius: 7px; background: transparent; cursor: pointer; font-size: 13px; font-weight: 700; }
+.price-mode-tab.active { background: white; box-shadow: 0 1px 4px rgba(45,39,31,.12); }
+.price-mode-tab:focus-visible, .formula-price-tooltip:focus-visible { outline: 2px solid #1c1c1a; outline-offset: 2px; }
+.price-mode-panel { display: grid; gap: 13px; }
+.price-mode-panel textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.price-formula-test { display: grid; gap: 13px; padding: 15px; border: 1px solid #e4e0d8; border-radius: 12px; background: #fbfaf8; }
+.formula-guidance { display: grid; gap: 9px; }
+.formula-example { display: block; padding: 10px 12px; border-radius: 8px; background: #f0ede7; color: #544f47; font-size: 11px; line-height: 1.55; white-space: normal; overflow-wrap: anywhere; }
+.formula-validation-row { display: flex; align-items: center; gap: 12px; }
+.formula-validation-row .message { flex: 1; min-width: 0; margin: 0; }
+.formula-results { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.formula-result { display: grid; gap: 5px; padding: 11px 13px; border-radius: 9px; background: #f0ede7; }
+.formula-result span { color: #77736d; font-size: 11px; }
+.formula-result strong { overflow-wrap: anywhere; font-size: 15px; }
+.formula-price-tooltip { position: relative; display: inline-flex; align-items: center; width: max-content; max-width: 100%; outline: none; }
+.formula-price-tooltip-content { position: fixed; left: 0; top: 0; z-index: 20; display: grid; gap: 6px; width: max-content; min-width: 220px; max-width: min(480px, 75vw); padding: 10px 12px; border: 1px solid #d9d5cc; border-radius: 10px; background: #fff; color: #3f3d38; box-shadow: 0 10px 26px rgba(35,31,26,.16); font-size: 11px; line-height: 1.45; opacity: 0; visibility: hidden; transform: translateY(4px); transition: opacity .14s ease, transform .14s ease, visibility .14s ease; pointer-events: none; }
+.formula-price-tooltip-content strong { font-size: 11px; }
+.formula-price-tooltip-content code { color: #5f5b54; font-size: 11px; overflow-wrap: anywhere; white-space: normal; }
+.formula-price-tooltip:hover .formula-price-tooltip-content, .formula-price-tooltip:focus-visible .formula-price-tooltip-content { opacity: 1; visibility: visible; transform: translateY(0); }
 .form-section { display: grid; gap: 13px; padding-top: 18px; border-top: 1px solid #eae6df; }
 .form-section h3 { margin: 0; font-size: 14px; }
 .compact-toolbar { margin: 0; }
@@ -242,7 +270,8 @@ tbody tr:last-child td { border-bottom: 0; }
 details { padding: 14px; border: 1px solid #e2ded6; border-radius: 10px; }
 summary { cursor: pointer; font-size: 13px; font-weight: 700; }
 details p { margin: 8px 0; }
-.dialog-actions { display: flex; justify-content: flex-end; gap: 9px; padding-top: 6px; }
+.dialog-actions { display: flex; justify-content: flex-end; align-items: center; gap: 9px; padding-top: 6px; }
+.dialog-actions .muted { margin: 0 auto 0 0; max-width: 520px; }
 .dialog-actions .secondary { min-height: 38px; }
 .form-message { margin: 0; }
 .import-results { display: grid; gap: 8px; max-height: 360px; overflow-y: auto; }
@@ -254,7 +283,7 @@ details p { margin: 8px 0; }
 @media (max-width: 1000px) { .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .config-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 820px) { .login-shell { grid-template-columns: 1fr; gap: 30px; padding: 28px 18px; } .login-intro h1 { font-size: 44px; } .admin-shell { grid-template-columns: minmax(0, 1fr); } .sidebar { position: static; height: auto; padding: 12px; border-right: 0; border-bottom: 1px solid #e3e0d8; } .sidebar-brand { padding-bottom: 12px; } .sidebar nav { grid-template-columns: repeat(5, minmax(100px, 1fr)); overflow-x: auto; } .nav-item { text-align: center; white-space: nowrap; } .sidebar-footer { display: none; } .workspace { padding: 24px 16px 55px; } .workspace-header { margin-bottom: 25px; } .account-pill { display: none; } }
 @media (max-width: 700px) { .connection-grid { grid-template-columns: 1fr; } }
-@media (max-width: 560px) { .trust-grid, .stats-grid, .bill-stats, .form-grid.two-columns, #section-models .model-money-stats, #section-models .model-usage-stats { grid-template-columns: 1fr; } .login-card { padding: 22px; } .workspace-header h1 { font-size: 25px; } .section-toolbar, .custom-model-section-header, .custom-model-card-header { align-items: stretch; flex-direction: column; } .section-toolbar .primary, .custom-model-section-header .secondary { width: 100%; } .config-card-header { flex-direction: column; } .config-meta { grid-template-columns: 1fr 1fr; } .dialog-form { padding: 20px; } }
+@media (max-width: 560px) { .trust-grid, .stats-grid, .bill-stats, .form-grid.two-columns, #section-models .model-money-stats, #section-models .model-usage-stats, .formula-results, .price-mode-tabs { grid-template-columns: 1fr; } .login-card { padding: 22px; } .workspace-header h1 { font-size: 25px; } .section-toolbar, .custom-model-section-header, .custom-model-card-header, .formula-validation-row { align-items: stretch; flex-direction: column; } .section-toolbar .primary, .custom-model-section-header .secondary, .formula-validation-row .secondary { width: 100%; } .config-card-header { flex-direction: column; } .config-meta { grid-template-columns: 1fr 1fr; } .dialog-form { padding: 20px; } }
 
 /* Compact language controls share the existing card/header layout. */
 .workspace-actions { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
@@ -266,6 +295,7 @@ details p { margin: 8px 0; }
 .login-card { position: relative; }
 .login-card > .language-control { position: absolute; top: 24px; right: 22px; }
 .login-card > .eyebrow, .login-card .stack-form > .eyebrow { min-height: 32px; padding-right: 122px; display: flex; align-items: center; }
+.project-search { margin: 8px 0 14px; }
 html[lang="en"] .login-intro h1 { font-size: clamp(32px, 4vw, 50px); }
 .section-toolbar, .inline-actions { flex-wrap: wrap; }
 .section-toolbar > div { min-width: 0; }
