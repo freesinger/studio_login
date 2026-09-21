@@ -40,7 +40,18 @@ export async function assertRateLimit(
       [sameWindow ? current.window_started_at : now, nextCount, input.action, input.subject],
     );
     if (nextCount > input.limit) {
-      throw new AppError(message('errors.rateLimited'), 429, 'RATE_LIMITED');
+      const retryAfterSeconds = Math.max(
+        1,
+        Math.ceil((
+          new Date(current.window_started_at).getTime() + input.windowMs - now.getTime()
+        ) / 1000),
+      );
+      throw new AppError(
+        message('errors.rateLimited'),
+        429,
+        'RATE_LIMITED',
+        { retryAfterSeconds },
+      );
     }
   });
 }

@@ -59,15 +59,12 @@ export class CaptchaService {
     private readonly createAnswer: () => string = randomAnswer,
   ) {}
 
-  async issue(clientIp: string): Promise<{ captchaToken: string; image: string }> {
-    await assertRateLimit(this.database, {
-      action: 'captcha-issue-ip', subject: clientIp, limit: 30, windowMs: 10 * 60 * 1000,
-    });
+  async issue(): Promise<{ captchaToken: string; image: string }> {
     if (randomInt(100) === 0) {
       await this.database.execute(
         `DELETE FROM api_rate_limits
           WHERE updated_at < DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 10 MINUTE)
-            AND action IN ('login-captcha-used', 'captcha-issue-ip', 'login-ip', 'login')
+            AND action IN ('login-captcha-used', 'login')
           LIMIT 1000`,
       );
     }

@@ -80,6 +80,7 @@ export interface MessageParameters {
   'connections.deploymentRegion': Record<string, never>;
   'connections.credentials': Record<string, never>;
   'common.edit': Record<string, never>;
+  'common.view': Record<string, never>;
   'connections.create': Record<string, never>;
   'connections.createHelp': Record<string, never>;
   'common.editNamed': { name: MessageValue };
@@ -202,6 +203,8 @@ export interface MessageParameters {
   'auth.captchaRefresh': Record<string, never>;
   'auth.captchaInvalid': Record<string, never>;
   'auth.captchaLoadFailed': Record<string, never>;
+  'auth.captchaRateLimited': { seconds: MessageValue };
+  'auth.captchaRefreshed': Record<string, never>;
   'projects.chooseTitle': Record<string, never>;
   'projects.chooseHelp': Record<string, never>;
   'projects.selection': Record<string, never>;
@@ -228,6 +231,8 @@ export interface MessageParameters {
   'users.empty': Record<string, never>;
   'pricing.description': { currency: MessageValue };
   'pricing.scope': Record<string, never>;
+  'pricing.customerPrice': { currency: MessageValue };
+  'pricing.costPrice': { currency: MessageValue };
   'pricing.customerUnitPrice': { currency: MessageValue };
   'pricing.costUnitPrice': { currency: MessageValue };
   'pricing.empty': Record<string, never>;
@@ -274,6 +279,9 @@ export interface MessageParameters {
   'groups.dataSharingIrreversibleHelp': Record<string, never>;
   'groups.dataSharingLockedHelp': Record<string, never>;
   'groups.dataSharingCannotDisable': Record<string, never>;
+  'groups.readOnlyBadge': Record<string, never>;
+  'groups.readOnlyHelp': Record<string, never>;
+  'groups.readOnly': Record<string, never>;
   'groups.setDefault': Record<string, never>;
   'groups.requiredSettings': Record<string, never>;
   'groups.fullSettings': Record<string, never>;
@@ -298,6 +306,34 @@ export interface MessageParameters {
   'pricing.billingUnit': Record<string, never>;
   'pricing.scopeHelp': Record<string, never>;
   'pricing.internalCostUnitPrice': { currency: MessageValue };
+  'pricing.customerPricing': Record<string, never>;
+  'pricing.costPricing': Record<string, never>;
+  'pricing.unitPricing': Record<string, never>;
+  'pricing.formulaPricing': Record<string, never>;
+  'pricing.formulaBadge': Record<string, never>;
+  'pricing.formula': Record<string, never>;
+  'pricing.customerFormula': Record<string, never>;
+  'pricing.costFormula': Record<string, never>;
+  'pricing.customerFormulaDetail': Record<string, never>;
+  'pricing.costFormulaDetail': Record<string, never>;
+  'pricing.formulaHelp': Record<string, never>;
+  'pricing.formulaExample': Record<string, never>;
+  'pricing.billingContextSample': Record<string, never>;
+  'pricing.billingContextHelp': Record<string, never>;
+  'pricing.validateFormula': Record<string, never>;
+  'pricing.validatingFormula': Record<string, never>;
+  'pricing.formulaValid': Record<string, never>;
+  'pricing.customerTrialAmount': Record<string, never>;
+  'pricing.costTrialAmount': Record<string, never>;
+  'pricing.formulaRequired': Record<string, never>;
+  'pricing.formulaInvalid': Record<string, never>;
+  'pricing.formulaUnsupportedBillingItem': Record<string, never>;
+  'pricing.billingContextRequired': Record<string, never>;
+  'pricing.billingContextInvalid': Record<string, never>;
+  'pricing.formulaMissingField': { path: MessageValue };
+  'pricing.formulaNonNumericField': { path: MessageValue };
+  'pricing.formulaDivisionByZero': Record<string, never>;
+  'pricing.formulaResultInvalid': Record<string, never>;
   'pricing.save': Record<string, never>;
   'nav.accessibleLabel': Record<string, never>;
   'connections.namePlaceholder': Record<string, never>;
@@ -447,6 +483,8 @@ export interface MessageParameters {
   'modelUsage.outputTokens': Record<string, never>;
   'modelUsage.cachedTokens': Record<string, never>;
   'errors.network': Record<string, never>;
+  'projects.searchPlaceholder': Record<string, never>;
+  'projects.noResults': Record<string, never>;
 }
 
 export type MessageKey = keyof MessageParameters;

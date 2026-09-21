@@ -35,6 +35,15 @@ describe('deployment configuration', () => {
     expect(config.STUDIO_LOGIN_CURRENCY).toBe('CNY');
     expect(config.defaultPrices).toEqual({ customerUnitPrice: '1', costUnitPrice: '0.5' });
     expect(config.timeZone).toBe('Asia/Shanghai');
+    expect(config.STUDIO_LOGIN_READONLY_CONFIG_GROUP_PROJECT_IDS).toEqual([]);
+  });
+
+  it('parses read-only config group project IDs from the deployment environment', () => {
+    const config = loadConfig({
+      ...env,
+      STUDIO_LOGIN_READONLY_CONFIG_GROUP_PROJECT_IDS: ' locked_project_alpha, locked_project_beta, locked_project_alpha ',
+    });
+    expect(config.STUDIO_LOGIN_READONLY_CONFIG_GROUP_PROJECT_IDS).toEqual(['locked_project_alpha', 'locked_project_beta']);
   });
 
   it.each(['', '   '])('uses Shanghai for an empty TZ (%j)', tz => {
@@ -64,7 +73,11 @@ describe('deployment configuration', () => {
         const response = await app.inject({ url: '/api/runtime-config', headers: { 'accept-language': language } });
         expect(response.statusCode).toBe(200);
         expect(response.headers['cache-control']).toBe('no-store');
-        expect(response.json()).toEqual({ currency, timeZone: 'UTC', defaultPrices: config.defaultPrices });
+        expect(response.json()).toEqual({
+          currency,
+          timeZone: 'UTC',
+          defaultPrices: config.defaultPrices,
+        });
       }
     } finally { await app.close(); }
   });

@@ -1,5 +1,6 @@
 import { runtimeConfig } from './runtime-config.js';
 import { t, locale } from './i18n.js';
+import { createCaptchaController } from './login-captcha.js';
 
 const { currency, timeZone, defaultPrices } = runtimeConfig;
 
@@ -57,6 +58,34 @@ const customModelTypes = {
 
 const customImageRatios = ['16:9', '9:16', '1:1', '4:3', '3:4'];
 const customImageResolutions = ['1K', '1.5K', '2K', '3K', '4K'];
+const chatPriceFormulaExample = '(prompt_tokens - prompt_tokens_details.cached_tokens) * 0.002 + prompt_tokens_details.cached_tokens * 0.0002 + completion_tokens * 0.001';
+const chatBillingContextExample = {
+  total_tokens: 15958,
+  prompt_tokens: 15116,
+  completion_tokens: 842,
+  prompt_tokens_details: {
+    audio_tokens: null,
+    cached_tokens: 4920,
+    provisioned_tokens: null,
+    audio_cached_tokens: null,
+  },
+  completion_tokens_details: {
+    reasoning_tokens: 0,
+    provisioned_tokens: null,
+  },
+};
+const responsesPriceFormulaExample = '(input_tokens - input_tokens_details.cached_tokens) * 0.002 + input_tokens_details.cached_tokens * 0.0002 + output_tokens * 0.001';
+const responsesBillingContextExample = {
+  total_tokens: 15958,
+  input_tokens: 15116,
+  output_tokens: 842,
+  input_tokens_details: {
+    cached_tokens: 4920,
+  },
+  output_tokens_details: {
+    reasoning_tokens: 0,
+  },
+};
 const defaultCustomImageRatios = ['16:9', '9:16', '1:1', '4:3'];
 const defaultCustomImageResolutions = ['1K', '1.5K', '2K', '3K'];
 
@@ -96,7 +125,18 @@ async function api(url, options = {}) {
     },
   });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.message || t('errors.requestFailed', { status: response.status }));
+  if (!response.ok) {
+    const error = new Error(body.message || t('errors.requestFailed', { status: response.status }));
+    error.status = response.status;
+    error.code = body.code;
+    const retryAfterSeconds = Number(
+      response.headers.get('retry-after') || body.data?.retryAfterSeconds,
+    );
+    if (Number.isInteger(retryAfterSeconds) && retryAfterSeconds > 0) {
+      error.retryAfterSeconds = retryAfterSeconds;
+    }
+    throw error;
+  }
   return body;
 }
 
@@ -133,6 +173,31 @@ function setFormMessage(form, message, error = false) {
   const node = form.querySelector('.form-message');
   node.textContent = message;
   node.classList.toggle('error', error);
+}
+
+function setConfigFormReadOnly(form, readOnly) {
+  form.dataset.readOnly = readOnly ? 'true' : 'false';
+  [
+    ...manualResourceFieldNames,
+    'resourceJson',
+    'monthlyLimit',
+  ].forEach(name => {
+    if (form.elements[name]) {
+      form.elements[name].readOnly = readOnly;
+      form.elements[name].disabled = false;
+    }
+  });
+  ['projectLevelSharing', 'isDefault'].forEach(name => {
+    if (form.elements[name]) form.elements[name].disabled = readOnly;
+  });
+  $('#add-custom-model').disabled = readOnly;
+  $('#config-submit').classList.toggle('hidden', readOnly);
+  $('#config-readonly-help').classList.toggle('hidden', !readOnly);
+  $('#config-sharing-field').classList.toggle('locked', readOnly);
+  [...$('#custom-model-list').querySelectorAll('input, textarea')]
+    .forEach(node => { node.readOnly = readOnly; });
+  [...$('#custom-model-list').querySelectorAll('select, input[type="checkbox"], [data-custom-model-action="test"], [data-custom-model-action="delete"]')]
+    .forEach(node => { node.disabled = readOnly; });
 }
 
 function badge(status) {
@@ -460,6 +525,7 @@ function renderCustomModelCards(models = []) {
       </div>
     </article>`;
   }).join('');
+  if ($('#config-form')?.dataset.readOnly === 'true') setConfigFormReadOnly($('#config-form'), true);
 }
 
 function setCustomModelCardVerified(card, status) {
@@ -600,16 +666,27 @@ async function showProjectChooser(actor) {
   $('#project-view').classList.remove('hidden');
   setText('#project-user', t('projects.chooseForUser', { name: actor.displayName || actor.loginName }));
   setText('#project-message', t('projects.loading'));
+  $('#project-search').value = '';
   try {
     const result = await api('/api/auth/my-projects');
     state.loginProjects = result.items || [];
-    $('#project-list').innerHTML = state.loginProjects.length
-      ? state.loginProjects.map(item => `<button class="connection-add-card project-entry" data-project-connection="${escapeHtml(item.connectionId)}" data-project-group="${escapeHtml(item.name)}" type="button">
-          <strong>${escapeHtml(item.projectId || item.name)}</strong>
-          <span>${escapeHtml(item.connectionName || item.connectionId)}${item.isDefault ? t('common.defaultSuffix') : ''}</span>
-        </button>`).join('')
-      : `<div class="empty">${t('projects.empty')}</div>`;
+    const renderProjects = (items, query) => {
+      const list = query ? items.filter(i => {
+        const q = query.toLowerCase();
+        return (i.projectId || '').toLowerCase().includes(q)
+          || (i.name || '').toLowerCase().includes(q)
+          || (i.connectionName || '').toLowerCase().includes(q);
+      }) : items;
+      $('#project-list').innerHTML = list.length
+        ? list.map(item => `<button class="connection-add-card project-entry" data-project-connection="${escapeHtml(item.connectionId)}" data-project-group="${escapeHtml(item.name)}" type="button">
+            <strong>${escapeHtml(item.projectId || item.name)}</strong>
+            <span>${escapeHtml(item.connectionName || item.connectionId)}${item.isDefault ? t('common.defaultSuffix') : ''}</span>
+          </button>`).join('')
+        : `<div class="empty">${query ? t('projects.noResults') : t('projects.empty')}</div>`;
+    };
+    renderProjects(state.loginProjects, '');
     setText('#project-message', '');
+    $('#project-search').oninput = e => renderProjects(state.loginProjects, e.target.value.trim());
   } catch (error) {
     setText('#project-message', error.message);
     $('#project-message').classList.add('error');
@@ -789,13 +866,14 @@ function renderConfigGroups() {
     const available = quota.availableAmount === null || quota.availableAmount === undefined
       ? t('quota.unlimited')
       : `${formatMoney(quota.availableAmount)} ${currency}`;
+    const readOnly = Boolean(group.readOnly);
     return `<article class="config-card">
       <div class="config-card-header">
-        <div class="config-card-title"><h3>${escapeHtml(group.projectId)}</h3>${group.isDefault ? `<span class="badge neutral">${t('common.default')}</span>` : ''}${badge(group.status)}</div>
+        <div class="config-card-title"><h3>${escapeHtml(group.projectId)}</h3>${group.isDefault ? `<span class="badge neutral">${t('common.default')}</span>` : ''}${readOnly ? `<span class="badge neutral">${t('groups.readOnlyBadge')}</span>` : ''}${badge(group.status)}</div>
         <div class="config-card-actions">
-          <button class="small-button" data-config-action="edit" data-group-id="${escapeHtml(group.configGroupId)}" type="button">${t('common.edit')}</button>
-          ${group.status === 'PARTIAL_FAILED' ? `<button class="small-button" data-config-action="retry" data-group-id="${escapeHtml(group.configGroupId)}" type="button">${t('common.retrySync')}</button>` : ''}
-          <button class="small-button danger" data-config-action="delete" data-group-id="${escapeHtml(group.configGroupId)}" type="button">${t('common.delete')}</button>
+          <button class="small-button" data-config-action="edit" data-group-id="${escapeHtml(group.configGroupId)}" type="button">${readOnly ? t('common.view') : t('common.edit')}</button>
+          ${!readOnly && group.status === 'PARTIAL_FAILED' ? `<button class="small-button" data-config-action="retry" data-group-id="${escapeHtml(group.configGroupId)}" type="button">${t('common.retrySync')}</button>` : ''}
+          ${readOnly ? '' : `<button class="small-button danger" data-config-action="delete" data-group-id="${escapeHtml(group.configGroupId)}" type="button">${t('common.delete')}</button>`}
         </div>
       </div>
       <div class="config-meta">
@@ -810,6 +888,7 @@ function renderConfigGroups() {
         <div><span>${t('quota.availableBalance')}</span><strong>${escapeHtml(available)}</strong></div>
         <div><span>${t('groups.dataSharing')}</span><strong>${group.projectLevelSharing ? t('common.enabled') : t('common.disabled')}</strong></div>
       </div>
+      ${readOnly ? `<div class="sync-notices"><div><strong>${t('groups.readOnlyBadge')}</strong><span>${t('groups.readOnlyHelp')}</span></div></div>` : ''}
       ${group.resourceConfigSyncError ? `<div class="sync-notices"><div><strong>${t('groups.showingLocalCache')}</strong><span>${escapeHtml(group.resourceConfigSyncError)}</span></div></div>` : ''}
       ${group.failedUsers?.length ? `<div class="sync-errors">${group.failedUsers.map(user => `<div><strong>${escapeHtml(user.loginName)}</strong><span>${escapeHtml(user.errorCode || 'PROFILE_SYNC_FAILED')} · ${escapeHtml(user.errorMessage || t('status.syncFailed'))}${user.requestId ? ` · Request ID: ${escapeHtml(user.requestId)}` : ''}</span></div>`).join('')}</div>` : ''}
     </article>`;
@@ -885,20 +964,24 @@ function collectUserBindings() {
 
 function openConfigDialog(group = null) {
   const form = $('#config-form');
+  setConfigFormReadOnly(form, false);
   form.reset();
   setConfigMode('manual');
   renderCustomModelCards([]);
   setFormMessage(form, '');
+  const readOnly = Boolean(group?.readOnly);
   $('#config-group-id').value = group?.configGroupId || '';
-  setText('#config-dialog-title', group ? t('common.editNamed', { name: group.projectId }) : t('groups.create'));
+  setText('#config-dialog-title', group
+    ? (readOnly ? `${t('common.view')} · ${group.projectId}` : t('common.editNamed', { name: group.projectId }))
+    : t('groups.create'));
   $('#config-default-field').classList.toggle('hidden', Boolean(group));
   // 编辑时锁定 Studio 连接与配置组名称：二者绑定真实 Studio 用户记录与映射，不允许改动
   form.elements.connectionId.disabled = Boolean(group);
   form.elements.projectId.readOnly = Boolean(group);
-  const sharingLocked = Boolean(group?.projectLevelSharing);
+  const sharingLocked = Boolean(group?.projectLevelSharing) || readOnly;
   form.elements.projectLevelSharing.disabled = sharingLocked;
   $('#config-sharing-field').classList.toggle('locked', sharingLocked);
-  $('#config-sharing-locked').classList.toggle('hidden', !sharingLocked);
+  $('#config-sharing-locked').classList.toggle('hidden', !Boolean(group?.projectLevelSharing));
   if (group) {
     form.elements.monthlyLimit.value = group.monthlyLimit || '';
     form.elements.projectLevelSharing.checked = Boolean(group.projectLevelSharing);
@@ -919,6 +1002,7 @@ function openConfigDialog(group = null) {
     form.elements.connectionId.value = state.connection?.connectionId || '';
     form.elements.projectId.value = state.actor.accountId;
   }
+  if (readOnly) setConfigFormReadOnly(form, true);
   $('#config-dialog').showModal();
 }
 
@@ -996,6 +1080,10 @@ async function deleteConfigGroup(configGroupId) {
 async function submitConfig(event) {
   event.preventDefault();
   const form = event.currentTarget;
+  if (form.dataset.readOnly === 'true') {
+    setFormMessage(form, t('groups.readOnlyHelp'), true);
+    return;
+  }
   try {
     setFormMessage(form, t('groups.saving'));
     const resourceConfig = resourceConfigFromForm(form);
@@ -1218,6 +1306,28 @@ async function retrySubaccount(userId) {
   }
 }
 
+function formulaPriceCell(formula, detailLabel, tooltipId) {
+  if (!formula) return '';
+  return `<span class="formula-price-tooltip" tabindex="0" aria-describedby="${tooltipId}">
+    <span class="badge neutral">${t('pricing.formulaBadge')}</span>
+    <span id="${tooltipId}" class="formula-price-tooltip-content" role="tooltip"><strong>${escapeHtml(detailLabel)}</strong><code>${escapeHtml(formula)}</code></span>
+  </span>`;
+}
+
+function positionFormulaPriceTooltip(trigger) {
+  const tooltip = trigger?.querySelector('.formula-price-tooltip-content');
+  if (!tooltip) return;
+  const triggerRect = trigger.getBoundingClientRect();
+  const margin = 10;
+  const maxLeft = Math.max(margin, window.innerWidth - tooltip.offsetWidth - margin);
+  tooltip.style.left = `${Math.min(Math.max(margin, triggerRect.left), maxLeft)}px`;
+  const below = triggerRect.bottom + 8;
+  const above = triggerRect.top - tooltip.offsetHeight - 8;
+  tooltip.style.top = `${below + tooltip.offsetHeight <= window.innerHeight - margin || above < margin
+    ? below
+    : above}px`;
+}
+
 async function loadPrices() {
   refreshPriceScopeFilter();
   const scopeId = $('#price-scope-filter').value;
@@ -1226,11 +1336,15 @@ async function loadPrices() {
   const items = result.items || [];
   state.prices = items;
   $('#price-empty').classList.toggle('hidden', items.length > 0);
-  $('#price-list').innerHTML = items.map(item => `<tr>
+  $('#price-list').innerHTML = items.map((item, index) => `<tr>
     <td><div class="cell-title"><strong class="billing-item-full">${escapeHtml(item.billingItemId)}</strong>${item.custom ? `<span>${t('pricing.customBillingItem')}</span>` : ''}</div></td>
     <td>${escapeHtml(item.unit)}</td>
-    <td>${escapeHtml(formatPrice(item.customerUnitPrice))}</td>
-    <td>${escapeHtml(formatPrice(item.costUnitPrice))}</td>
+    <td>${item.customerPriceFormula
+      ? formulaPriceCell(item.customerPriceFormula, t('pricing.customerFormulaDetail'), `customer-formula-${index}`)
+      : escapeHtml(formatPrice(item.customerUnitPrice))}</td>
+    <td>${item.costPriceFormula
+      ? formulaPriceCell(item.costPriceFormula, t('pricing.costFormulaDetail'), `cost-formula-${index}`)
+      : escapeHtml(formatPrice(item.costUnitPrice))}</td>
     <td>${item.configured ? badge(item.enabled ? 'ACTIVE' : 'DISABLED') : item.inherited ? `<span class="badge neutral">${t('pricing.inheritedFallback')}</span>` : item.builtinDefault ? `<span class="badge neutral">${t('pricing.builtinFallback')}</span>` : `<span class="badge neutral">${t('common.notConfigured')}</span>`}</td>
     <td><div class="inline-actions"><button class="small-button" data-price-action="edit" data-price-scope-type="${escapeHtml(item.scopeType || '')}" data-price-scope-id="${escapeHtml(item.scopeId || '')}" data-price-item-id="${escapeHtml(item.billingItemId)}" data-price-unit="${escapeHtml(item.unit)}" type="button">${item.configured ? t('common.edit') : t('common.configure')}</button>${item.enabled ? `<button class="small-button danger" data-price-action="delete" data-price-scope-type="${escapeHtml(item.scopeType)}" data-price-scope-id="${escapeHtml(item.scopeId)}" data-price-item-id="${escapeHtml(item.billingItemId)}" data-price-unit="${escapeHtml(item.unit)}" type="button">${t('common.delete')}</button>` : ''}</div></td>
   </tr>`).join('');
@@ -1256,6 +1370,75 @@ async function deletePrice(button) {
   }
 }
 
+function clearPriceFormulaValidation() {
+  const message = $('#price-formula-message');
+  message.textContent = '';
+  message.classList.remove('error');
+  $('#price-formula-results').classList.add('hidden');
+  $('#price-customer-formula-result').classList.add('hidden');
+  $('#price-cost-formula-result').classList.add('hidden');
+}
+
+function updatePriceFormulaTestVisibility() {
+  const form = $('#price-form');
+  const supported = $('#price-config-fields').classList.contains('formula-enabled');
+  const hasFormulaMode = ['customer', 'cost'].some(kind =>
+    form.elements[`${kind}PricingMode`].value === 'FORMULA');
+  $('#price-formula-test').classList.toggle('hidden', !supported || !hasFormulaMode);
+}
+
+function setPriceMode(kind, mode) {
+  const form = $('#price-form');
+  const formulaMode = mode === 'FORMULA';
+  const pricingMode = formulaMode ? 'FORMULA' : 'UNIT';
+  form.elements[`${kind}PricingMode`].value = pricingMode;
+  $$(`.price-mode-tab[data-price-kind="${kind}"]`).forEach(button => {
+    const active = button.dataset.priceMode === pricingMode;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  $(`#price-${kind}-unit-panel`).classList.toggle('hidden', formulaMode);
+  $(`#price-${kind}-formula-panel`).classList.toggle('hidden', !formulaMode);
+  form.elements[`${kind}UnitPrice`].required = !formulaMode;
+  form.elements[`${kind}PriceFormula`].required = formulaMode;
+  clearPriceFormulaValidation();
+  updatePriceFormulaTestVisibility();
+}
+
+function priceFormulaSupported(item) {
+  const form = $('#price-form');
+  const billingItemId = item?.billingItemId ?? form.elements.billingItemId.value.trim();
+  const unit = item?.unit ?? form.elements.unit.value.trim();
+  if (item?.formulaPricingSupported !== undefined) return Boolean(item.formulaPricingSupported);
+  return state.prices.some(price =>
+    price.billingItemId === billingItemId
+    && price.unit === unit
+    && price.formulaPricingSupported);
+}
+
+function setPriceFormulaAvailability(item) {
+  const supported = priceFormulaSupported(item);
+  $('#price-config-fields').classList.toggle('formula-enabled', supported);
+  if (!supported) {
+    setPriceMode('customer', 'UNIT');
+    setPriceMode('cost', 'UNIT');
+  }
+  updatePriceFormulaTestVisibility();
+}
+
+function priceFormulaExamples(item) {
+  return item?.source === 'CUSTOM_MODEL'
+    ? {
+        formula: responsesPriceFormulaExample,
+        billingContext: responsesBillingContextExample,
+      }
+    : {
+        formula: chatPriceFormulaExample,
+        billingContext: chatBillingContextExample,
+      };
+}
+
 function openPriceDialog(item = null) {
   const form = $('#price-form');
   form.reset();
@@ -1269,18 +1452,78 @@ function openPriceDialog(item = null) {
   form.elements.unit.readOnly = Boolean(item);
   form.elements.scopeId.disabled = Boolean(item?.configured);
   refreshPriceScopeSelect(item?.scopeId || $('#price-scope-filter').value);
+  const examples = priceFormulaExamples(item);
   if (item) {
     form.elements.billingItemId.value = item.billingItemId;
     form.elements.unit.value = item.unit;
     form.elements.customerUnitPrice.value = formatPrice(item.customerUnitPrice);
+    form.elements.customerPriceFormula.value = item.customerPriceFormula || examples.formula;
     form.elements.costUnitPrice.value = formatPrice(item.costUnitPrice);
+    form.elements.costPriceFormula.value = item.costPriceFormula || examples.formula;
   } else {
     form.elements.billingItemId.value = '';
     form.elements.unit.value = '';
     form.elements.customerUnitPrice.value = defaultPrices.customerUnitPrice;
+    form.elements.customerPriceFormula.value = examples.formula;
     form.elements.costUnitPrice.value = defaultPrices.costUnitPrice;
+    form.elements.costPriceFormula.value = examples.formula;
   }
+  setPriceFormulaAvailability(item);
+  const formulaSupported = priceFormulaSupported(item);
+  setPriceMode('customer', item?.customerPriceFormula && formulaSupported ? 'FORMULA' : 'UNIT');
+  setPriceMode('cost', item?.costPriceFormula && formulaSupported ? 'FORMULA' : 'UNIT');
+  form.elements.billingContextSample.value = JSON.stringify(examples.billingContext, null, 2);
+  clearPriceFormulaValidation();
   $('#price-dialog').showModal();
+}
+
+async function validatePriceFormulas() {
+  const form = $('#price-form');
+  const button = $('#validate-price-formula');
+  const message = $('#price-formula-message');
+  button.disabled = true;
+  message.classList.remove('error');
+  message.textContent = t('pricing.validatingFormula');
+  try {
+    const result = await api('/api/admin/prices/validate-formula', {
+      method: 'POST',
+      body: JSON.stringify({
+        accountId: state.actor.accountId,
+        billingItemId: form.elements.billingItemId.value.trim(),
+        unit: form.elements.unit.value.trim(),
+        scopeType: form.elements.scopeId.value === '*' ? 'PLATFORM' : 'CONFIG_GROUP',
+        scopeId: form.elements.scopeId.value,
+        customerFormula: form.elements.customerPricingMode.value === 'FORMULA'
+          ? form.elements.customerPriceFormula.value.trim()
+          : undefined,
+        costFormula: form.elements.costPricingMode.value === 'FORMULA'
+          ? form.elements.costPriceFormula.value.trim()
+          : undefined,
+        billingContext: form.elements.billingContextSample.value.trim(),
+      }),
+    });
+    message.textContent = t('pricing.formulaValid');
+    const customerResult = $('#price-customer-formula-result');
+    const costResult = $('#price-cost-formula-result');
+    customerResult.classList.toggle('hidden', result.customerAmount === undefined);
+    costResult.classList.toggle('hidden', result.costAmount === undefined);
+    customerResult.querySelector('strong').textContent = result.customerAmount === undefined
+      ? ''
+      : `${result.customerAmount} ${currency}`;
+    costResult.querySelector('strong').textContent = result.costAmount === undefined
+      ? ''
+      : `${result.costAmount} ${currency}`;
+    $('#price-formula-results').classList.toggle(
+      'hidden',
+      result.customerAmount === undefined && result.costAmount === undefined,
+    );
+  } catch (error) {
+    $('#price-formula-results').classList.add('hidden');
+    message.textContent = error.message;
+    message.classList.add('error');
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function submitPrice(event) {
@@ -1296,8 +1539,16 @@ async function submitPrice(event) {
         scopeId: form.elements.scopeId.value,
         billingItemId: form.elements.billingItemId.value.trim(),
         unit: form.elements.unit.value.trim(),
+        customerPricingMode: form.elements.customerPricingMode.value,
         customerUnitPrice: form.elements.customerUnitPrice.value.trim(),
+        customerPriceFormula: form.elements.customerPricingMode.value === 'FORMULA'
+          ? form.elements.customerPriceFormula.value.trim()
+          : null,
+        costPricingMode: form.elements.costPricingMode.value,
         costUnitPrice: form.elements.costUnitPrice.value.trim(),
+        costPriceFormula: form.elements.costPricingMode.value === 'FORMULA'
+          ? form.elements.costPriceFormula.value.trim()
+          : null,
       }),
     });
     form.reset();
@@ -1555,20 +1806,28 @@ function switchSection(section) {
   if (section === 'bills') loadBills().catch(error => toast(error.message, true));
 }
 
-async function loadCaptcha() {
-  const form = $('#login-form');
-  $('#login-submit').disabled = true;
-  $('#refresh-captcha').disabled = true;
-  form.elements.captchaToken.value = '';
-  form.elements.captchaCode.value = '';
-  try {
-    const challenge = await api('/api/auth/captcha');
-    $('#captcha-image').src = challenge.image;
-    form.elements.captchaToken.value = challenge.captchaToken;
-    $('#login-submit').disabled = false;
-  } finally {
-    $('#refresh-captcha').disabled = false;
-  }
+const captchaController = createCaptchaController({
+  form: $('#login-form'),
+  image: $('#captcha-image'),
+  loginButton: $('#login-submit'),
+  refreshButton: $('#refresh-captcha'),
+  requestChallenge: () => api('/api/auth/captcha'),
+  onRateLimited: seconds => {
+    setText('#login-message', t('auth.captchaRateLimited', { seconds }));
+    $('#login-message').classList.add('error');
+  },
+  onRetryRecovered: () => {
+    setText('#login-message', t('auth.captchaRefreshed'));
+    $('#login-message').classList.remove('error');
+  },
+  onRetryFailed: error => {
+    setText('#login-message', error.message || t('auth.captchaLoadFailed'));
+    $('#login-message').classList.add('error');
+  },
+});
+
+function loadCaptcha(options) {
+  return captchaController.load(options);
 }
 
 $('#login-form').addEventListener('submit', async event => {
@@ -1588,8 +1847,10 @@ $('#login-form').addEventListener('submit', async event => {
   } catch (error) {
     message.textContent = error.message;
     message.classList.add('error');
-    await loadCaptcha().catch(() => {
-      message.textContent = `${error.message} ${t('auth.captchaLoadFailed')}`;
+    await loadCaptcha({ invalidateExisting: true }).catch(refreshError => {
+      if (refreshError.status !== 429) {
+        message.textContent = `${error.message} ${t('auth.captchaLoadFailed')}`;
+      }
     });
   }
 });
@@ -1650,6 +1911,26 @@ $('#config-form').addEventListener('submit', submitConfig);
 $('#studio-form').addEventListener('submit', submitStudioConnection);
 $('#user-form').addEventListener('submit', submitUser);
 $('#price-form').addEventListener('submit', submitPrice);
+$$('.price-mode-tab').forEach(button => button.addEventListener('click', () => setPriceMode(button.dataset.priceKind, button.dataset.priceMode)));
+$$('.price-mode-tabs').forEach(tablist => tablist.addEventListener('keydown', event => {
+  if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+  const tabs = [...tablist.querySelectorAll('.price-mode-tab')];
+  const current = Math.max(0, tabs.indexOf(document.activeElement));
+  const next = event.key === 'Home'
+    ? 0
+    : event.key === 'End'
+      ? tabs.length - 1
+      : (current + (['ArrowRight', 'ArrowDown'].includes(event.key) ? 1 : -1) + tabs.length) % tabs.length;
+  event.preventDefault();
+  tabs[next].focus();
+  tabs[next].click();
+}));
+$('#validate-price-formula').addEventListener('click', validatePriceFormulas);
+$('#price-form').elements.billingItemId.addEventListener('input', () => setPriceFormulaAvailability(null));
+$('#price-form').elements.unit.addEventListener('input', () => setPriceFormulaAvailability(null));
+$('#price-form').elements.customerPriceFormula.addEventListener('input', clearPriceFormulaValidation);
+$('#price-form').elements.costPriceFormula.addEventListener('input', clearPriceFormulaValidation);
+$('#price-form').elements.billingContextSample.addEventListener('input', clearPriceFormulaValidation);
 $('#bill-period').addEventListener('change', event => loadBills(event.target.value).catch(error => toast(error.message, true)));
 $('#bill-dimension').addEventListener('change', () => loadBills().catch(error => toast(error.message, true)));
 $('#model-search').addEventListener('click', () => loadModelUsage().catch(error => toast(error.message, true)));
@@ -1665,6 +1946,7 @@ $('#model-list').addEventListener('click', event => {
 });
 $$('.config-mode-tab').forEach(button => button.addEventListener('click', () => setConfigMode(button.dataset.configMode)));
 $('#add-custom-model').addEventListener('click', () => {
+  if ($('#config-form').dataset.readOnly === 'true') return;
   const models = getCustomModelConfigsFromDom();
   models.push(defaultCustomModel('LANGUAGE', models.length));
   renderCustomModelCards(models);
@@ -1691,6 +1973,7 @@ $('#custom-model-list').addEventListener('click', event => {
   if (!button) return;
   const card = button.closest('.custom-model-card');
   if (!card) return;
+  if ($('#config-form').dataset.readOnly === 'true' && button.dataset.customModelAction !== 'toggle-secret') return;
   if (button.dataset.customModelAction === 'delete') {
     const models = getCustomModelConfigsFromDom();
     models.splice(Number(card.dataset.customModelIndex || 0), 1);
@@ -1803,6 +2086,14 @@ $('#price-list').addEventListener('click', event => {
     return;
   }
   if (button.dataset.priceAction === 'delete') deletePrice(button);
+});
+$('#price-list').addEventListener('mouseover', event => {
+  const trigger = event.target.closest('.formula-price-tooltip');
+  if (trigger) positionFormulaPriceTooltip(trigger);
+});
+$('#price-list').addEventListener('focusin', event => {
+  const trigger = event.target.closest('.formula-price-tooltip');
+  if (trigger) positionFormulaPriceTooltip(trigger);
 });
 
 $('#toggle-user-password').addEventListener('click', () => {

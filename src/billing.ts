@@ -12,6 +12,7 @@ import { decryptJson } from './security.js';
 import { DEFAULT_PRICES, type DefaultPrices } from './deployment.js';
 import type { AppConfig } from './config.js';
 import type { Actor, ResourceConfig } from './types.js';
+import { evaluatePriceFormula, validatePriceFormula } from './price-formula.js';
 
 export interface BaselineItemInput {
   BillingItemId: string;
@@ -36,7 +37,9 @@ interface PriceRow extends RowDataPacket {
   billing_item_id: string;
   unit: string;
   customer_unit_price: string;
+  customer_price_formula: string | null;
   cost_unit_price: string;
+  cost_price_formula: string | null;
   scope_type?: string;
 }
 
@@ -47,7 +50,9 @@ interface AdminPriceRow extends RowDataPacket {
   billing_item_id: string;
   unit: string;
   customer_unit_price: string;
+  customer_price_formula: string | null;
   cost_unit_price: string;
+  cost_price_formula: string | null;
   enabled: number;
   updated_at: Date;
 }
@@ -91,7 +96,9 @@ interface TaskItemRow extends RowDataPacket {
   model_id: string | null;
   unit: string;
   customer_unit_price: string;
+  customer_price_formula: string | null;
   cost_unit_price: string;
+  cost_price_formula: string | null;
   estimated_billing_context: string | Record<string, unknown> | null;
   actual_billing_context: string | Record<string, unknown> | null;
 }
@@ -110,9 +117,13 @@ interface PriceSnapshot {
   unit: string;
   estimatedUsage: Decimal;
   customerUnitPrice: Decimal;
+  customerPriceFormula: string | null;
   costUnitPrice: Decimal;
+  costPriceFormula: string | null;
   estimatedAmount: Decimal;
   estimatedCost: Decimal;
+  customerFormulaFallbackCode?: string;
+  costFormulaFallbackCode?: string;
 }
 
 interface LimitCheckContext {
@@ -161,6 +172,35 @@ interface BillingAuditPayload {
 
 function amount(value: Decimal): string {
   return value.toDecimalPlaces(6, Decimal.ROUND_HALF_UP).toFixed(6);
+}
+
+function roundedAmount(value: Decimal): Decimal {
+  return new Decimal(amount(value));
+}
+
+const formulaContextErrorCodes = new Set([
+  'BILLING_CONTEXT_REQUIRED',
+  'INVALID_BILLING_CONTEXT',
+  'PRICE_FORMULA_FIELD_MISSING',
+  'PRICE_FORMULA_FIELD_NOT_NUMERIC',
+  'PRICE_FORMULA_DIVISION_BY_ZERO',
+  'INVALID_PRICE_FORMULA_RESULT',
+]);
+
+function formulaAmountOrFallback(
+  formula: string | null,
+  context: string | undefined,
+  fallback: Decimal,
+): { value: Decimal; error?: AppError } {
+  if (!formula) return { value: roundedAmount(fallback) };
+  try {
+    return { value: roundedAmount(evaluatePriceFormula(formula, context)) };
+  } catch (error) {
+    if (error instanceof AppError && formulaContextErrorCodes.has(error.code)) {
+      return { value: roundedAmount(fallback), error };
+    }
+    throw error;
+  }
 }
 
 function usage(value: number | string): Decimal {
@@ -250,7 +290,8 @@ async function resolvePrice(
   defaults: DefaultPrices,
 ): Promise<PriceSnapshot> {
   const rows = await tx.query<PriceRow>(
-    `SELECT billing_item_id, unit, customer_unit_price, cost_unit_price
+    `SELECT billing_item_id, unit, customer_unit_price, customer_price_formula,
+            cost_unit_price, cost_price_formula
        FROM operator_prices
       WHERE ((scope_type = 'CONFIG_GROUP' AND scope_id = ?)
           OR (scope_type = 'PLATFORM' AND scope_id = '*'))
@@ -265,12 +306,26 @@ async function resolvePrice(
     billing_item_id: item.BillingItemId,
     unit: item.Unit,
     customer_unit_price: defaults.customerUnitPrice,
+    customer_price_formula: null,
     cost_unit_price: defaults.costUnitPrice,
+    cost_price_formula: null,
     scope_type: 'BUILTIN_DEFAULT',
   };
   const estimatedUsage = usage(item.Usage);
   const customerUnitPrice = new Decimal(row.customer_unit_price);
+  const customerPriceFormula = row.customer_price_formula;
   const costUnitPrice = new Decimal(row.cost_unit_price);
+  const costPriceFormula = row.cost_price_formula;
+  const estimatedCustomer = formulaAmountOrFallback(
+    customerPriceFormula,
+    item.BillingContext,
+    customerUnitPrice.mul(estimatedUsage),
+  );
+  const estimatedInternalCost = formulaAmountOrFallback(
+    costPriceFormula,
+    item.BillingContext,
+    costUnitPrice.mul(estimatedUsage),
+  );
   return {
     itemIndex,
     billingItemId: row.billing_item_id,
@@ -278,9 +333,13 @@ async function resolvePrice(
     unit: row.unit,
     estimatedUsage,
     customerUnitPrice,
+    customerPriceFormula,
     costUnitPrice,
-    estimatedAmount: customerUnitPrice.mul(estimatedUsage),
-    estimatedCost: costUnitPrice.mul(estimatedUsage),
+    costPriceFormula,
+    estimatedAmount: estimatedCustomer.value,
+    estimatedCost: estimatedInternalCost.value,
+    customerFormulaFallbackCode: estimatedCustomer.error?.code,
+    costFormulaFallbackCode: estimatedInternalCost.error?.code,
   };
 }
 
@@ -379,11 +438,27 @@ export class BillingService {
     billingItemId: string;
     unit: string;
     customerUnitPrice: string;
+    customerPriceFormula?: string | null;
+    costPriceFormula?: string | null;
+    formulaPricingSupported?: boolean;
     costUnitPrice: string;
     actor: Actor;
   }): Promise<void> {
     new Decimal(input.customerUnitPrice);
     new Decimal(input.costUnitPrice);
+    const customerPriceFormula = input.customerPriceFormula?.trim()
+      ? validatePriceFormula(input.customerPriceFormula)
+      : null;
+    const costPriceFormula = input.costPriceFormula?.trim()
+      ? validatePriceFormula(input.costPriceFormula)
+      : null;
+    if ((customerPriceFormula || costPriceFormula) && !input.formulaPricingSupported) {
+      throw new AppError(
+        message('pricing.formulaUnsupportedBillingItem'),
+        400,
+        'PRICE_FORMULA_UNSUPPORTED_BILLING_ITEM',
+      );
+    }
     if (input.scopeType === 'PLATFORM') {
       if (input.scopeId !== '*') {
         throw new AppError(message('pricing.invalidPlatformScope'), 400, 'INVALID_PRICE_SCOPE');
@@ -403,11 +478,14 @@ export class BillingService {
     await this.database.execute(
       `INSERT INTO operator_prices
         (price_id, scope_type, scope_id, billing_item_id, unit,
-         customer_unit_price, cost_unit_price, enabled, updated_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, TRUE, ?)
+         customer_unit_price, customer_price_formula, cost_unit_price, cost_price_formula,
+         enabled, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, ?)
        ON DUPLICATE KEY UPDATE
          customer_unit_price = VALUES(customer_unit_price),
+         customer_price_formula = VALUES(customer_price_formula),
          cost_unit_price = VALUES(cost_unit_price),
+         cost_price_formula = VALUES(cost_price_formula),
          enabled = TRUE,
          updated_by = VALUES(updated_by)`,
       [
@@ -417,7 +495,9 @@ export class BillingService {
         input.billingItemId,
         input.unit,
         input.customerUnitPrice,
+        customerPriceFormula,
         input.costUnitPrice,
+        costPriceFormula,
         input.actor.userId,
       ],
     );
@@ -449,7 +529,8 @@ export class BillingService {
     }
     const rows = await this.database.query<AdminPriceRow>(
       `SELECT p.scope_type, p.scope_id, g.name AS scope_name,
-              p.billing_item_id, p.unit, p.customer_unit_price, p.cost_unit_price,
+              p.billing_item_id, p.unit, p.customer_unit_price, p.customer_price_formula,
+              p.cost_unit_price, p.cost_price_formula,
               p.enabled, p.updated_at
          FROM operator_prices p
          LEFT JOIN config_groups g
@@ -467,7 +548,9 @@ export class BillingService {
         billingItemId: row.billing_item_id,
         unit: row.unit,
         customerUnitPrice: row.customer_unit_price,
+        customerPriceFormula: row.customer_price_formula,
         costUnitPrice: row.cost_unit_price,
+        costPriceFormula: row.cost_price_formula,
         enabled: Boolean(row.enabled),
         updatedAt: row.updated_at,
       })),
@@ -604,9 +687,13 @@ export class BillingService {
           unit: item.unit,
           estimatedUsage: amount(item.estimatedUsage),
           customerUnitPrice: item.customerUnitPrice.toFixed(10),
+          customerPricingMode: item.customerPriceFormula ? 'FORMULA' : 'UNIT',
           costUnitPrice: item.costUnitPrice.toFixed(10),
+          costPricingMode: item.costPriceFormula ? 'FORMULA' : 'UNIT',
           estimatedAmount: amount(item.estimatedAmount),
           estimatedCost: amount(item.estimatedCost),
+          customerFormulaFallbackCode: item.customerFormulaFallbackCode,
+          costFormulaFallbackCode: item.costFormulaFallbackCode,
         })),
       }, 'Billing estimate calculated');
       const userSubjectId = `${user.user_id}:${configGroupId}`;
@@ -670,8 +757,9 @@ export class BillingService {
         await tx.execute(
           `INSERT INTO studio_task_items
             (task_id, item_index, billing_item_id, model_id, unit, estimated_usage,
-             customer_unit_price, cost_unit_price, estimated_billing_context)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             customer_unit_price, customer_price_formula, cost_unit_price, cost_price_formula,
+             estimated_customer_amount, estimated_cost_amount, estimated_billing_context)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             taskId,
             item.itemIndex,
@@ -680,7 +768,11 @@ export class BillingService {
             item.unit,
             amount(item.estimatedUsage),
             item.customerUnitPrice.toFixed(10),
+            item.customerPriceFormula,
             item.costUnitPrice.toFixed(10),
+            item.costPriceFormula,
+            amount(item.estimatedAmount),
+            amount(item.estimatedCost),
             billingContext(inputItem?.BillingContext),
           ],
         );
@@ -774,16 +866,44 @@ export class BillingService {
             throw new AppError(message('billing.unitMismatch', { billingItemId: stored.billing_item_id }), 400, 'BILLING_UNIT_MISMATCH');
           }
           const actualUsage = usage(actual.Usage);
-          actualAmount = actualAmount.plus(new Decimal(stored.customer_unit_price).mul(actualUsage));
-          actualCost = actualCost.plus(new Decimal(stored.cost_unit_price).mul(actualUsage));
+          const itemActualCustomer = formulaAmountOrFallback(
+            stored.customer_price_formula,
+            actual.BillingContext,
+            new Decimal(stored.customer_unit_price).mul(actualUsage),
+          );
+          const itemActualInternalCost = formulaAmountOrFallback(
+            stored.cost_price_formula,
+            actual.BillingContext,
+            new Decimal(stored.cost_unit_price).mul(actualUsage),
+          );
+          const itemActualAmount = itemActualCustomer.value;
+          const itemActualCost = itemActualInternalCost.value;
+          if (itemActualCustomer.error || itemActualInternalCost.error) {
+            this.logger.warn({
+              event: 'billing_formula_settlement_fallback',
+              requestId: input.RequestId,
+              connectionId,
+              appId,
+              taskId: task.task_id,
+              itemIndex: stored.item_index,
+              billingItemId: stored.billing_item_id,
+              customerFormulaErrorCode: itemActualCustomer.error?.code,
+              costFormulaErrorCode: itemActualInternalCost.error?.code,
+            }, 'Billing formula settlement fell back to unit price snapshot');
+          }
+          actualAmount = actualAmount.plus(itemActualAmount);
+          actualCost = actualCost.plus(itemActualCost);
           await tx.execute(
             `UPDATE studio_task_items
                 SET actual_usage = ?, model_id = COALESCE(?, model_id),
+                    actual_customer_amount = ?, actual_cost_amount = ?,
                     actual_billing_context = ?, status = 'SUCCEEDED'
               WHERE task_id = ? AND item_index = ?`,
             [
               amount(actualUsage),
               actual.ModelId?.trim() || null,
+              amount(itemActualAmount),
+              amount(itemActualCost),
               billingContext(actual.BillingContext),
               task.task_id,
               stored.item_index,
@@ -792,7 +912,10 @@ export class BillingService {
         }
       } else {
         await tx.execute(
-          'UPDATE studio_task_items SET actual_usage = 0, status = ? WHERE task_id = ?',
+          `UPDATE studio_task_items
+              SET actual_usage = 0, actual_customer_amount = 0,
+                  actual_cost_amount = 0, status = ?
+            WHERE task_id = ?`,
           [input.Status, task.task_id],
         );
       }
