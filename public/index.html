@@ -52,6 +52,7 @@
       <p class="eyebrow" data-i18n="projects.selection">Project 选择</p>
       <h2 data-i18n="projects.openStudio">进入 Studio</h2>
       <p class="muted" id="project-user" data-i18n="projects.chooseAccessible">请选择有权限的 Project。</p>
+      <input id="project-search" class="project-search" type="search" data-i18n-placeholder="projects.searchPlaceholder" placeholder="搜索 Project..." autocomplete="off">
       <div id="project-list" class="card-list"></div>
       <div class="dialog-actions"><button id="project-logout" class="secondary" type="button" data-i18n="auth.signOut">退出登录</button></div>
       <p class="message" id="project-message" aria-live="polite"></p>
@@ -113,7 +114,7 @@
 
       <section id="section-prices" class="page-section hidden system-admin-only">
         <div class="section-toolbar"><div><h2 data-i18n="nav.pricing">价格配置</h2><p data-i18n="pricing.description">价格按配置组生效；历史任务使用创建时的价格快照。</p></div><div class="inline-actions"><label class="inline-field price-scope-filter"><span data-i18n="pricing.scope">作用范围</span><select id="price-scope-filter"></select></label><button id="add-price" class="primary compact" type="button" data-i18n="pricing.add">新增价格</button><button id="download-price-template" class="secondary compact" type="button" data-i18n="csv.downloadTemplate">下载 CSV 模板</button><button id="import-prices" class="secondary compact" type="button" data-i18n="csv.import">CSV 导入</button><input id="price-csv-file" class="hidden" type="file" accept=".csv,text/csv"></div></div>
-        <div class="table-card"><div class="table-scroll"><table><thead><tr><th data-i18n="common.billingItem">计费项</th><th data-i18n="common.unit">单位</th><th data-i18n="pricing.customerUnitPrice">客户单价</th><th data-i18n="pricing.costUnitPrice">成本单价</th><th data-i18n="common.status">状态</th><th></th></tr></thead><tbody id="price-list"></tbody></table></div><div id="price-empty" class="empty hidden" data-i18n="pricing.empty">当前作用范围暂时没有价格配置。</div></div>
+        <div class="table-card"><div class="table-scroll"><table><thead><tr><th data-i18n="common.billingItem">计费项</th><th data-i18n="common.unit">单位</th><th data-i18n="pricing.customerPrice">客户价格</th><th data-i18n="pricing.costPrice">内部成本</th><th data-i18n="common.status">状态</th><th></th></tr></thead><tbody id="price-list"></tbody></table></div><div id="price-empty" class="empty hidden" data-i18n="pricing.empty">当前作用范围暂时没有价格配置。</div></div>
       </section>
 
       <section id="section-models" class="page-section hidden">
@@ -188,7 +189,7 @@
         <div id="custom-model-panel" class="form-section"><div class="custom-model-section-header"><div><h3 data-i18n="customModels.optionalTitle">自定义模型配置（可选）</h3><p class="muted" data-i18n="customModels.description">按 Studio 自定义模型配置录入；保存时只写入 customModels，模型类型决定后续调用路径。</p></div><button id="add-custom-model" class="secondary compact" type="button" data-i18n="customModels.add">+ 添加自定义模型</button></div><div id="custom-model-list" class="custom-model-list"></div><div id="custom-model-empty" class="empty compact-empty" data-i18n="customModels.empty">暂未添加自定义模型。</div></div>
       </section>
       <p class="message form-message" aria-live="polite"></p>
-      <div class="dialog-actions"><button class="secondary close-dialog" type="button" data-i18n="common.cancel">取消</button><button class="primary compact" type="submit" data-i18n="groups.saveAndApply">保存并生效</button></div>
+      <div class="dialog-actions"><p id="config-readonly-help" class="muted hidden" data-i18n="groups.readOnlyHelp">该配置组已由部署环境设置为只读。页面和 API 只能查看；如需修改，请直接调整数据库。</p><button class="secondary close-dialog" type="button" data-i18n="common.cancel">取消</button><button id="config-submit" class="primary compact" type="submit" data-i18n="groups.saveAndApply">保存并生效</button></div>
     </form>
   </dialog>
 
@@ -218,15 +219,52 @@
     </div>
   </dialog>
 
-  <dialog id="price-dialog" class="modal small-modal">
+  <dialog id="price-dialog" class="modal">
     <form id="price-form" class="dialog-form">
       <div class="dialog-header"><div class="dialog-heading"><p class="eyebrow" data-i18n="pricing.rules">计费规则</p><h2 id="price-dialog-title" data-i18n="pricing.configure">配置价格</h2></div><button class="icon-button close-dialog" type="button" data-i18n="common.close">关闭</button></div>
       <input id="price-edit-mode" type="hidden">
+      <input name="customerPricingMode" type="hidden" value="UNIT">
+      <input name="costPricingMode" type="hidden" value="UNIT">
       <label><span data-i18n="pricing.billingItemId">计费项 ID</span><input name="billingItemId" required maxlength="128" placeholder="例如 custom_model_token" data-i18n-placeholder="pricing.billingItemPlaceholder"></label>
       <label><span data-i18n="pricing.billingUnit">计费单位</span><input name="unit" required maxlength="32" placeholder="例如 token / request / second" data-i18n-placeholder="pricing.unitPlaceholder"></label>
       <label><span data-i18n="pricing.scope">作用范围</span><select name="scopeId" id="price-scope" required></select><span class="muted" data-i18n="pricing.scopeHelp">价格优先匹配配置组；平台默认仅作为未配置组价格时的兜底。</span></label>
-      <label><span data-i18n="pricing.customerUnitPrice">客户单价</span><input name="customerUnitPrice" required inputmode="decimal" step="0.0000000001" value="0"></label>
-      <label><span data-i18n="pricing.internalCostUnitPrice">内部成本单价</span><input name="costUnitPrice" required inputmode="decimal" step="0.0000000001" value="0"></label>
+      <div id="price-config-fields" class="price-config-fields">
+        <section class="price-config-section">
+          <h3 class="price-formula-control" data-i18n="pricing.customerPricing">客户价格配置</h3>
+          <div class="price-mode-tabs price-formula-control" role="tablist" data-i18n-aria-label="pricing.customerPricing">
+            <button id="price-customer-unit-tab" class="price-mode-tab active" data-price-kind="customer" data-price-mode="UNIT" role="tab" aria-selected="true" aria-controls="price-customer-unit-panel" type="button" data-i18n="pricing.unitPricing">按用量单价</button>
+            <button id="price-customer-formula-tab" class="price-mode-tab" data-price-kind="customer" data-price-mode="FORMULA" role="tab" aria-selected="false" aria-controls="price-customer-formula-panel" tabindex="-1" type="button" data-i18n="pricing.formulaPricing">按 BillingContext 公式</button>
+          </div>
+          <div id="price-customer-unit-panel" class="price-mode-panel" role="tabpanel" aria-labelledby="price-customer-unit-tab">
+            <label><span data-i18n="pricing.customerUnitPrice">客户单价</span><input name="customerUnitPrice" required inputmode="decimal" step="0.0000000001" value="0"></label>
+          </div>
+          <div id="price-customer-formula-panel" class="price-mode-panel hidden" role="tabpanel" aria-labelledby="price-customer-formula-tab">
+            <label><span data-i18n="pricing.customerFormula">客户计价公式</span><textarea name="customerPriceFormula" maxlength="2000" rows="3" spellcheck="false"></textarea></label>
+          </div>
+        </section>
+        <section class="price-config-section">
+          <h3 class="price-formula-control" data-i18n="pricing.costPricing">内部成本配置</h3>
+          <div class="price-mode-tabs price-formula-control" role="tablist" data-i18n-aria-label="pricing.costPricing">
+            <button id="price-cost-unit-tab" class="price-mode-tab active" data-price-kind="cost" data-price-mode="UNIT" role="tab" aria-selected="true" aria-controls="price-cost-unit-panel" type="button" data-i18n="pricing.unitPricing">按用量单价</button>
+            <button id="price-cost-formula-tab" class="price-mode-tab" data-price-kind="cost" data-price-mode="FORMULA" role="tab" aria-selected="false" aria-controls="price-cost-formula-panel" tabindex="-1" type="button" data-i18n="pricing.formulaPricing">按 BillingContext 公式</button>
+          </div>
+          <div id="price-cost-unit-panel" class="price-mode-panel" role="tabpanel" aria-labelledby="price-cost-unit-tab">
+            <label><span data-i18n="pricing.internalCostUnitPrice">内部成本单价</span><input name="costUnitPrice" required inputmode="decimal" step="0.0000000001" value="0"></label>
+          </div>
+          <div id="price-cost-formula-panel" class="price-mode-panel hidden" role="tabpanel" aria-labelledby="price-cost-formula-tab">
+            <label><span data-i18n="pricing.costFormula">内部成本计价公式</span><textarea name="costPriceFormula" maxlength="2000" rows="3" spellcheck="false"></textarea></label>
+          </div>
+        </section>
+        <section id="price-formula-test" class="price-formula-test hidden">
+          <div class="formula-guidance"><span class="muted" data-i18n="pricing.formulaHelp">直接填写 BillingContext 字段路径，仅支持数字、字段访问、括号及四则运算。公式结果即本次金额，不再乘 Usage。值为 null 的字段按 0 计算；字段缺失会报错。</span><code class="formula-example" data-i18n="pricing.formulaExample">示例</code></div>
+          <label><span data-i18n="pricing.billingContextSample">测试 BillingContext</span><textarea name="billingContextSample" rows="9" spellcheck="false"></textarea><span class="muted" data-i18n="pricing.billingContextHelp">可粘贴 BillingContext 对象、JSON 字符串，或包含 BillingContext 字段的完整计费项。</span></label>
+          <div class="formula-validation-row"><button id="validate-price-formula" class="secondary compact" type="button" data-i18n="pricing.validateFormula">校验并试算</button><p id="price-formula-message" class="message" aria-live="polite"></p></div>
+          <div id="price-formula-results" class="formula-results hidden" aria-live="polite">
+            <div id="price-customer-formula-result" class="formula-result hidden"><span data-i18n="pricing.customerTrialAmount">客户金额</span><strong></strong></div>
+            <div id="price-cost-formula-result" class="formula-result hidden"><span data-i18n="pricing.costTrialAmount">内部成本</span><strong></strong></div>
+          </div>
+        </section>
+      </div>
       <p class="message form-message" aria-live="polite"></p>
       <div class="dialog-actions"><button class="secondary close-dialog" type="button" data-i18n="common.cancel">取消</button><button class="primary compact" type="submit" data-i18n="pricing.save">保存价格</button></div>
     </form>

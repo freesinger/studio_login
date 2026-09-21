@@ -223,6 +223,16 @@ export class ConfigGroupService {
     private readonly studioConnections: StudioConnectionService,
   ) {}
 
+  private isReadOnlyProject(projectId: string): boolean {
+    return this.config.STUDIO_LOGIN_READONLY_CONFIG_GROUP_PROJECT_IDS.includes(projectId.trim());
+  }
+
+  private assertProjectMutable(projectId: string): void {
+    if (this.isReadOnlyProject(projectId)) {
+      throw new AppError(message('groups.readOnly'), 403, 'CONFIG_GROUP_READ_ONLY');
+    }
+  }
+
   async create(input: {
     accountId: string;
     connectionId: string;
@@ -233,6 +243,8 @@ export class ConfigGroupService {
     projectLevelSharing: boolean;
     actor: Actor;
   }): Promise<{ configGroupId: string; version: number; status: string }> {
+    const projectId = input.projectId.trim();
+    this.assertProjectMutable(projectId);
     await this.requireStudioReady(input.accountId, input.connectionId);
     const deployment = await this.studioConnections.deploymentProfile(
       input.accountId,
@@ -242,7 +254,30 @@ export class ConfigGroupService {
     const id = groupId();
     await this.database.transaction(async tx => {
       if (input.isDefault) {
-        await tx.execute('UPDATE config_groups SET is_default = FALSE WHERE account_id = ?', [input.accountId]);
+        const readOnlyProjectIds = this.config.STUDIO_LOGIN_READONLY_CONFIG_GROUP_PROJECT_IDS;
+        if (readOnlyProjectIds.length > 0) {
+          const placeholders = readOnlyProjectIds.map(() => '?').join(', ');
+          const rows = await tx.query<{ count: number } & RowDataPacket>(
+            `SELECT COUNT(*) AS count
+               FROM config_groups
+              WHERE account_id = ?
+                AND status <> 'DELETED'
+                AND is_default = TRUE
+                AND project_id IN (${placeholders})`,
+            [input.accountId, ...readOnlyProjectIds],
+          );
+          if (Number(rows[0]?.count) > 0) {
+            throw new AppError(message('groups.readOnly'), 403, 'CONFIG_GROUP_READ_ONLY');
+          }
+          await tx.execute(
+            `UPDATE config_groups
+                SET is_default = FALSE
+              WHERE account_id = ? AND project_id NOT IN (${placeholders})`,
+            [input.accountId, ...readOnlyProjectIds],
+          );
+        } else {
+          await tx.execute('UPDATE config_groups SET is_default = FALSE WHERE account_id = ?', [input.accountId]);
+        }
       }
       await tx.execute(
         `INSERT INTO config_groups
@@ -253,8 +288,8 @@ export class ConfigGroupService {
           id,
           input.accountId,
           input.connectionId,
-          input.projectId.trim(),
-          input.projectId.trim(),
+          projectId,
+          projectId,
           input.monthlyLimit,
           input.isDefault,
           input.projectLevelSharing,
@@ -294,6 +329,7 @@ export class ConfigGroupService {
       if (!group || group.status === 'DELETED') {
         throw new AppError(message('groups.notFound'), 404, 'CONFIG_GROUP_NOT_FOUND');
       }
+      this.assertProjectMutable(group.project_id);
       if (Boolean(group.project_level_sharing) && input.projectLevelSharing === false) {
         throw new AppError(
           message('groups.dataSharingCannotDisable'),
@@ -303,6 +339,7 @@ export class ConfigGroupService {
       }
       const connectionId = input.connectionId ?? group.connection_id;
       const projectId = input.projectId?.trim() ?? group.project_id;
+      this.assertProjectMutable(projectId);
       if (connectionId !== group.connection_id || projectId !== group.project_id) {
         const users = await tx.query<{ count: number } & RowDataPacket>(
           `SELECT COUNT(*) AS count FROM users
@@ -473,6 +510,7 @@ export class ConfigGroupService {
         ),
         isDefault: Boolean(group.is_default),
         projectLevelSharing: Boolean(group.project_level_sharing),
+        readOnly: this.isReadOnlyProject(group.project_id),
         failedCount: failedUsers.length,
         failedUsers: failedUsers.map(user => ({
           userId: user.user_id,
@@ -524,6 +562,7 @@ export class ConfigGroupService {
     if (!group || group.status === 'DELETED') {
       throw new AppError(message('groups.notFound'), 404, 'CONFIG_GROUP_NOT_FOUND');
     }
+    this.assertProjectMutable(group.project_id);
     await this.requireStudioReady(input.accountId, group.connection_id);
     const version = await this.latestVersion(input.configGroupId);
     const resourceConfig = decryptJson<ResourceConfig>(version.encrypted_config, this.config.encryptionKey);
@@ -1180,6 +1219,18 @@ export class ConfigGroupService {
     accountId: string;
     configGroupId: string;
   }): Promise<{ configGroupId: string; status: string }> {
+    const groups = await this.database.query<GroupRow>(
+      `SELECT *
+         FROM config_groups
+        WHERE account_id = ? AND config_group_id = ?
+        LIMIT 1`,
+      [input.accountId, input.configGroupId],
+    );
+    const group = groups[0];
+    if (!group || group.status === 'DELETED') {
+      throw new AppError(message('groups.notFound'), 404, 'CONFIG_GROUP_NOT_FOUND');
+    }
+    this.assertProjectMutable(group.project_id);
     const refs = await this.database.query<{ count: number } & RowDataPacket>(
       `SELECT COUNT(*) AS count
          FROM user_config_group_bindings b

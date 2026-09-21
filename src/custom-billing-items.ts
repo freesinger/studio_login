@@ -17,6 +17,39 @@ export interface DerivedBillingCatalogItem {
   configGroupNames: string[];
 }
 
+interface BillingCatalogIdentity {
+  billingItemId: string;
+  unit: string;
+}
+
+export type PriceCatalogScopeType = 'PLATFORM' | 'CONFIG_GROUP';
+
+export function customBillingCatalogForScope(
+  items: readonly DerivedBillingCatalogItem[],
+  scopeType: PriceCatalogScopeType,
+  scopeId: string,
+): DerivedBillingCatalogItem[] {
+  if (scopeType === 'PLATFORM') return [...items];
+  return items.filter(item => item.configGroupIds.includes(scopeId));
+}
+
+export function supportsBillingContextPriceFormula(
+  billingItemId: string,
+  unit: string,
+  studioCatalog: readonly BillingCatalogIdentity[],
+  customCatalog: readonly DerivedBillingCatalogItem[],
+): boolean {
+  if (unit !== 'request') return false;
+  if (billingItemId.startsWith('las_llm')
+      && studioCatalog.some(item => item.billingItemId === billingItemId && item.unit === unit)) {
+    return true;
+  }
+  return customCatalog.some(item =>
+    item.billingItemId === billingItemId
+    && item.unit === unit
+    && item.source === 'CUSTOM_MODEL');
+}
+
 interface ConfigGroupVersionRow extends RowDataPacket {
   config_group_id: string;
   name: string;

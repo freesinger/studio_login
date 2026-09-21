@@ -9,6 +9,11 @@ import { translate } from './i18n.js';
 
 const envSchema = z.object({
   STUDIO_LOGIN_CURRENCY: z.enum(['CNY', 'USD']).default('CNY'),
+  STUDIO_LOGIN_READONLY_CONFIG_GROUP_PROJECT_IDS: z.string().default('').transform(value => [
+    ...new Set(value.split(',')
+      .map(item => item.trim())
+      .filter(Boolean)),
+  ]),
   APP_ENV: z.enum(['local', 'test', 'production']).default('local'),
   HOST: z.string().default('0.0.0.0'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3100),

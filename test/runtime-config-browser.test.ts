@@ -19,7 +19,13 @@ describe('browser deployment config', () => {
     expect(await result).toEqual(config);
     expect(showError).not.toHaveBeenCalled();
   });
-  it.each([null, {}, { ...config, currency: 'EUR' }, { ...config, timeZone: 'bad-zone' }, { ...config, defaultPrices: {} }])('fails closed for malformed config %j', async value => {
+  it.each([
+    null,
+    {},
+    { ...config, currency: 'EUR' },
+    { ...config, timeZone: 'bad-zone' },
+    { ...config, defaultPrices: {} },
+  ])('fails closed for malformed config %j', async value => {
     const { result, showError } = load(value);
     await expect(result).rejects.toThrow();
     expect(showError).toHaveBeenCalledWith('hidden');
