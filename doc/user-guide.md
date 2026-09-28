@@ -4,14 +4,11 @@ Studio Login 是 LAS Studio 的企业账号和用量管理入口。管理员在�
 
 本文面向日常使用人员，不包含安装部署和接口联调步骤。部署说明见仓库根目录的 `README.md`，双服务联调说明见 `doc/studio-login-integration-test-manual.md`。
 
-> 截图安全说明：本文截图于 2026 年 9 月 20 日使用独立 MySQL、Mock Studio 和专门构造的 Mock 数据生成。`manual-demo`、`design-prod`、`designer-demo` 等名称均为虚构数据，本机地址也不是线上服务地址。截图没有使用真实账号、Token、API Key、数据库连接或客户数据。
-
 ## 1. 角色与功能范围
 
 | 角色 | 可用功能 |
 | --- | --- |
 | 系统管理员 | 企业概览、Studio 连接、资源配置组、企业子账号、价格配置、模型统计和账单；可查看内部成本 |
-| 企业管理员 | 企业概览、Studio 连接、资源配置组、企业子账号、模型统计和账单；不显示价格配置和内部成本 |
 | 企业子账号 | 登录后选择已授权的 Project，并在新窗口进入 Studio |
 
 系统管理员账号由部署配置提供。管理员创建的普通业务账号均为企业子账号。
@@ -330,14 +327,3 @@ billingItemId,unit,customerPricingMode,customerUnitPrice,customerPriceFormula,co
 ### 修改价格后旧任务金额没有变化
 
 这是预期行为。任务创建时会保存价格快照，后续改价不会重算历史任务。
-
-## 12. 敏感信息处理要求
-
-使用 Studio Login 时遵循以下规则：
-
-- 不要在截图、文档、工单或聊天中出现 Integration Token、数据库密码、管理员密码、LAS API Key、Ark API Key、TOS 密钥或子账号明文密码。
-- 截图资源配置编辑页前，确认所有密钥输入框为空或已经完整打码。只保留末四位仍可能造成关联识别时，应全部遮挡。
-- 截图企业子账号列表时，不要点击查看密码。
-- 对线上页面截图时，应打码企业标识、登录账号、Project 名称、连接域名、任务 Request ID、账单金额和其他可识别业务信息。
-- 浏览器开发者工具、Network 请求、服务日志和审计 JSON 可能包含比页面更多的信息，不应直接截图或转发。
-- 演示和培训优先使用独立 Mock 数据库、Mock Studio 和虚构账号。演示环境不得复用生产 Token 或生产资源密钥。
