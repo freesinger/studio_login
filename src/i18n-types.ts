@@ -221,6 +221,13 @@ export interface MessageParameters {
   'connections.title': Record<string, never>;
   'groups.description': Record<string, never>;
   'users.description': { currency: MessageValue; timeZone: MessageValue };
+  'users.configGroupFilter': Record<string, never>;
+  'users.configGroupFilterHelp': Record<string, never>;
+  'users.clearGroupFilter': Record<string, never>;
+  'users.filteredEmpty': Record<string, never>;
+  'users.sortBySettled': Record<string, never>;
+  'users.sortSettledAsc': Record<string, never>;
+  'users.sortSettledDesc': Record<string, never>;
   'users.nameAndUsername': Record<string, never>;
   'csv.downloadTemplate': Record<string, never>;
   'csv.import': Record<string, never>;

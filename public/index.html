@@ -109,7 +109,7 @@
 
       <section id="section-users" class="page-section hidden">
         <div class="section-toolbar"><div><h2 data-i18n="nav.subaccounts">企业子账号</h2><p data-i18n="users.description">子账号限额按自然月统计；留空表示不设个人上限，但仍受所属配置组共享额度约束。</p></div><div class="inline-actions"><button id="download-user-template" class="secondary compact" type="button" data-i18n="csv.downloadTemplate">下载 CSV 模板</button><button id="import-users" class="secondary compact" type="button" data-i18n="csv.import">CSV 导入</button><button id="new-user" class="primary compact" type="button" data-i18n="users.create">创建子账号</button><input id="user-csv-file" class="hidden" type="file" accept=".csv,text/csv"></div></div>
-        <div class="table-card"><div class="table-scroll"><table class="user-table"><thead><tr><th data-i18n="users.nameAndUsername">名称 / 登录账号</th><th data-i18n="common.resourceGroup">配置组</th><th data-i18n="quota.personal">个人配额</th><th data-i18n="quota.settled">已结算</th><th data-i18n="quota.reserved">预冻结</th><th data-i18n="status.available">可用</th><th data-i18n="common.status">状态</th><th></th></tr></thead><tbody id="user-list"></tbody></table></div><div id="user-empty" class="empty hidden" data-i18n="users.empty">暂时没有企业子账号。</div></div>
+        <div class="table-card"><div class="table-scroll"><table class="user-table"><thead><tr><th data-i18n="users.nameAndUsername">名称 / 登录账号</th><th><button id="user-group-filter-trigger" class="table-filter-trigger" type="button" aria-haspopup="menu" aria-expanded="false"><span data-i18n="common.resourceGroup">配置组</span><span id="user-group-filter-count" class="filter-count hidden"></span><span aria-hidden="true">▾</span></button></th><th data-i18n="quota.personal">个人配额</th><th><span class="settled-sort-header"><span data-i18n="quota.settled">已结算</span><span class="settled-sort-buttons"><button id="user-settled-sort-asc" class="sort-icon-button" type="button" title="按已结算升序" aria-label="按已结算升序" data-i18n-title="users.sortSettledAsc" data-i18n-aria-label="users.sortSettledAsc">↑</button><button id="user-settled-sort-desc" class="sort-icon-button" type="button" title="按已结算降序" aria-label="按已结算降序" data-i18n-title="users.sortSettledDesc" data-i18n-aria-label="users.sortSettledDesc">↓</button></span></span></th><th data-i18n="quota.reserved">预冻结</th><th data-i18n="status.available">可用</th><th data-i18n="common.status">状态</th><th></th></tr></thead><tbody id="user-list"></tbody></table></div><div id="user-empty" class="empty hidden" data-i18n="users.empty">暂时没有企业子账号。</div></div>
       </section>
 
       <section id="section-prices" class="page-section hidden system-admin-only">
@@ -135,7 +135,7 @@
         <div class="stats-grid bill-stats model-usage-stats">
           <article class="stat-card usage-stat-card"><span data-i18n="modelUsage.usage">用量</span><strong id="model-usage-total">0</strong></article>
         </div>
-        <div class="table-card"><div class="table-scroll"><table><thead><tr id="model-head"></tr></thead><tbody id="model-list"></tbody></table></div><div id="model-empty" class="empty hidden" data-i18n="modelUsage.empty">当前筛选范围暂无计费用量。</div><div class="inline-actions"><button id="model-prev" class="secondary compact" type="button" data-i18n="pagination.previous">上一页</button><span id="model-page" data-i18n="pagination.firstPage">第 1 页</span><button id="model-next" class="secondary compact" type="button" data-i18n="pagination.next">下一页</button></div></div>
+        <div class="table-card"><div class="table-scroll"><table class="model-usage-table"><thead><tr id="model-head"></tr></thead><tbody id="model-list"></tbody></table></div><div id="model-empty" class="empty hidden" data-i18n="modelUsage.empty">当前筛选范围暂无计费用量。</div><div class="inline-actions"><button id="model-prev" class="secondary compact" type="button" data-i18n="pagination.previous">上一页</button><span id="model-page" data-i18n="pagination.firstPage">第 1 页</span><button id="model-next" class="secondary compact" type="button" data-i18n="pagination.next">下一页</button></div></div>
       </section>
 
       <section id="section-bills" class="page-section hidden">
@@ -270,6 +270,7 @@
     </form>
   </dialog>
 
+  <div id="user-group-filter-menu" class="table-filter-menu hidden" role="menu"></div>
   <div id="user-action-menu" class="user-action-menu hidden" role="menu"></div>
   <div id="toast" class="toast hidden" role="status"></div>
   <script type="module" src="/app.js"></script>

@@ -14,6 +14,8 @@ const state = {
   billingCatalog: [],
   loginProjects: [],
   modelPage: 1,
+  userGroupFilter: [],
+  userSettledSort: null,
 };
 
 const sectionTitles = {
@@ -836,6 +838,8 @@ async function loadConfigGroups() {
   refreshGroupSelect();
   refreshPriceScopeFilter();
   renderModelConfigGroupOptions();
+  renderUserGroupFilter();
+  if (state.users.length > 0) renderUsers();
 }
 
 function renderModelConfigGroupOptions() {
@@ -1134,6 +1138,7 @@ async function submitConfig(event) {
 async function loadUsers() {
   const result = await api(`/api/admin/subaccounts?accountId=${encodeURIComponent(state.actor.accountId)}`);
   state.users = result.items || [];
+  renderUserGroupFilter();
   renderUsers();
   setText('#stat-users', state.users.length);
   setText('#stat-users-note', t('overview.activeUsers', { count: state.users.filter(user => user.status === 'ACTIVE').length }));
@@ -1141,9 +1146,98 @@ async function loadUsers() {
     .map(user => `<option value="${escapeHtml(user.userId)}">${escapeHtml(user.displayName || user.loginName)}</option>`).join('');
 }
 
+function userGroupOptions() {
+  const options = new Map();
+  state.groups
+    .filter(group => group.status !== 'DELETED')
+    .forEach(group => {
+      options.set(group.configGroupId, group.projectId || group.name || group.configGroupId);
+    });
+  state.users.forEach(user => (user.bindings || []).forEach(binding => {
+    if (!options.has(binding.configGroupId)) {
+      options.set(binding.configGroupId, binding.projectId || binding.configGroupName || binding.configGroupId);
+    }
+  }));
+  return [...options.entries()].sort((left, right) => left[1].localeCompare(right[1]));
+}
+
+function renderUserGroupFilter() {
+  const menu = $('#user-group-filter-menu');
+  const count = $('#user-group-filter-count');
+  if (!menu || !count) return;
+  const available = userGroupOptions();
+  const availableIds = new Set(available.map(([id]) => id));
+  state.userGroupFilter = state.userGroupFilter.filter(id => availableIds.has(id));
+  count.textContent = String(state.userGroupFilter.length);
+  count.classList.toggle('hidden', state.userGroupFilter.length === 0);
+  menu.innerHTML = `<div class="table-filter-menu-header"><strong>${t('users.configGroupFilter')}</strong><button type="button" data-user-group-filter-clear>${t('users.clearGroupFilter')}</button></div>
+    <label class="filter-option"><input data-user-group-filter-all type="checkbox" ${state.userGroupFilter.length === 0 ? 'checked' : ''}><span>${t('common.all')}</span></label>
+    ${available.map(([id, name]) => `<label class="filter-option"><input data-user-group-filter-id="${escapeHtml(id)}" type="checkbox" ${state.userGroupFilter.includes(id) ? 'checked' : ''}><span>${escapeHtml(name)}</span></label>`).join('') || `<div class="filter-empty">${t('groups.empty')}</div>`}`;
+}
+
+function closeUserGroupFilterMenu() {
+  $('#user-group-filter-menu')?.classList.add('hidden');
+  $('#user-group-filter-trigger')?.setAttribute('aria-expanded', 'false');
+}
+
+function openUserGroupFilterMenu(button) {
+  renderUserGroupFilter();
+  const menu = $('#user-group-filter-menu');
+  const rect = button.getBoundingClientRect();
+  menu.style.top = `${rect.bottom + 6}px`;
+  menu.style.left = `${Math.max(12, Math.min(rect.left, window.innerWidth - 320))}px`;
+  menu.classList.remove('hidden');
+  button.setAttribute('aria-expanded', 'true');
+}
+
+function selectedUserGroupIds() {
+  return new Set(state.userGroupFilter);
+}
+
+function visibleUserBindings(user, selectedGroupIds = selectedUserGroupIds()) {
+  const bindings = user.bindings || [];
+  if (selectedGroupIds.size === 0) return bindings;
+  return bindings.filter(binding => selectedGroupIds.has(binding.configGroupId));
+}
+
+function userSettledAmount(user, selectedGroupIds = selectedUserGroupIds()) {
+  const bindings = visibleUserBindings(user, selectedGroupIds);
+  if (bindings.length > 0) {
+    return bindings.reduce((sum, binding) => sum + Number(binding.quota?.actualAmount || 0), 0);
+  }
+  return selectedGroupIds.size === 0 ? Number(user.quota?.actualAmount || 0) : 0;
+}
+
+function filteredSortedUsers() {
+  const selectedGroupIds = selectedUserGroupIds();
+  const filtered = selectedGroupIds.size === 0
+    ? [...state.users]
+    : state.users.filter(user => visibleUserBindings(user, selectedGroupIds).length > 0);
+  if (!state.userSettledSort) return filtered;
+  const direction = state.userSettledSort === 'asc' ? 1 : -1;
+  return filtered.sort((left, right) => {
+    const amountDiff = userSettledAmount(left, selectedGroupIds) - userSettledAmount(right, selectedGroupIds);
+    if (amountDiff !== 0) return amountDiff * direction;
+    return String(left.displayName || left.loginName).localeCompare(String(right.displayName || right.loginName));
+  });
+}
+
+function updateUserSettledSortButton() {
+  for (const direction of ['asc', 'desc']) {
+    const button = $(`#user-settled-sort-${direction}`);
+    if (!button) continue;
+    const active = state.userSettledSort === direction;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  }
+}
+
 function renderUsers() {
-  $('#user-empty').classList.toggle('hidden', state.users.length > 0);
-  $('#user-list').innerHTML = state.users.map(user => {
+  const users = filteredSortedUsers();
+  setText('#user-empty', state.users.length > 0 && users.length === 0 ? t('users.filteredEmpty') : t('users.empty'));
+  $('#user-empty').classList.toggle('hidden', users.length > 0);
+  updateUserSettledSortButton();
+  $('#user-list').innerHTML = users.map(user => {
     const quota = user.quota || {};
     const personalLimit = user.monthlyLimit
       ? `${formatMoney(user.monthlyLimit)} ${currency}`
@@ -1152,8 +1246,10 @@ function renderUsers() {
       || quota.effectiveAvailableAmount === undefined
       ? t('quota.unlimited')
       : `${formatMoney(quota.effectiveAvailableAmount)} ${currency}`;
-    const bindings = user.bindings || [];
-    const syncFailures = user.profileSyncFailures || [];
+    const bindings = visibleUserBindings(user);
+    const visibleBindingIds = new Set(bindings.map(binding => binding.configGroupId));
+    const syncFailures = (user.profileSyncFailures || [])
+      .filter(failure => visibleBindingIds.size === 0 || visibleBindingIds.has(failure.configGroupId));
     const bindingColumn = (render, fallback) => bindings.length
       ? `<div class="cell-title">${bindings.map(render).join('')}</div>`
       : fallback;
@@ -1210,6 +1306,7 @@ function openUserDialog(user = null) {
   const form = $('#user-form');
   form.reset();
   form.elements.password.type = 'password';
+  form.dataset.originalPassword = user?.password || '';
   $('#toggle-user-password').textContent = t('common.show');
   $('#toggle-user-password').setAttribute('aria-label', t('common.passwordShowLabel'));
   setFormMessage(form, '');
@@ -1219,7 +1316,7 @@ function openUserDialog(user = null) {
   setText('#user-submit', user ? t('common.save') : t('users.createAccount'));
   form.elements.loginName.readOnly = Boolean(user);
   form.elements.password.required = !user;
-  form.elements.password.value = '';
+  form.elements.password.value = user?.password || '';
   setText('#user-password-feedback', '');
   $('#user-password-feedback').classList.remove('invalid');
   setText('#user-password-help', user?.password ? t('users.currentPasswordHelp') : user ? t('users.legacyPasswordHelp') : t('users.passwordRequiredOnCreate'));
@@ -1242,7 +1339,9 @@ async function submitUser(event) {
     setFormMessage(form, t('users.creating'));
     const userId = $('#user-id').value;
     const newPassword = form.elements.password.value;
-    if (newPassword && !isStrongPassword(newPassword)) {
+    const originalPassword = form.dataset.originalPassword || '';
+    const passwordChanged = !userId || (Boolean(newPassword) && newPassword !== originalPassword);
+    if (passwordChanged && newPassword && !isStrongPassword(newPassword)) {
       setFormMessage(form, t('validation.passwordPolicy'), true);
       return;
     }
@@ -1251,7 +1350,7 @@ async function submitUser(event) {
         displayName: form.elements.displayName.value.trim(),
         configGroupBindings: collectUserBindings(),
     };
-    if (newPassword) payload.password = newPassword;
+    if (passwordChanged && newPassword) payload.password = newPassword;
     if (!userId) payload.loginName = form.elements.loginName.value.trim();
     await api(userId ? `/api/admin/subaccounts/${encodeURIComponent(userId)}` : '/api/admin/subaccounts', {
       method: userId ? 'PATCH' : 'POST',
@@ -1771,14 +1870,14 @@ async function loadModelUsage(page = 1) {
   setText('#model-cost-amount', formatMoney(result.totals.costAmount));
   $('#model-empty').classList.toggle('hidden', result.items.length > 0);
   $('#model-head').innerHTML = summary
-    ? `<th>${t('common.billingItem')}</th><th>${t('common.unit')}</th><th>${t('modelUsage.calls')}</th><th>${t('status.succeeded')}</th><th>${t('status.failed')}</th><th>${t('modelUsage.usage')}</th><th>${t('billing.customerAmount')} (${currency})</th>`
-      + (state.actor.role === 'SYSTEM_ADMIN' ? `<th>${t('billing.internalCost')} (${currency})</th>` : '')
-    : `<th>${t('common.time')}</th><th>${t('common.billingItem')}</th><th>${t('common.resourceGroup')}</th><th>${t('common.subaccount')}</th><th>${t('common.status')}</th><th>${t('modelUsage.usage')}</th><th>${t('billing.customerAmount')} (${currency})</th>`
-      + (state.actor.role === 'SYSTEM_ADMIN' ? `<th>${t('billing.internalCost')} (${currency})</th>` : '')
+    ? `<th>${t('common.billingItem')}</th><th>${t('common.unit')}</th><th>${t('modelUsage.calls')}</th><th>${t('status.succeeded')}</th><th>${t('status.failed')}</th><th>${t('modelUsage.usage')}</th><th>${t('billing.customerAmount')}</th>`
+      + (state.actor.role === 'SYSTEM_ADMIN' ? `<th>${t('billing.internalCost')}</th>` : '')
+    : `<th>${t('common.time')}</th><th>${t('common.billingItem')}</th><th>${t('common.resourceGroup')}</th><th>${t('common.subaccount')}</th><th>${t('common.status')}</th><th>${t('modelUsage.usage')}</th><th>${t('billing.customerAmount')}</th>`
+      + (state.actor.role === 'SYSTEM_ADMIN' ? `<th>${t('billing.internalCost')}</th>` : '')
       + `<th>${t('modelUsage.taskAudit')}</th>`;
   $('#model-list').innerHTML = result.items.map(item => summary
     ? `<tr><td>${escapeHtml(item.dimensionName || item.dimensionId || '—')}</td><td>${escapeHtml(item.unit)}</td><td>${escapeHtml(item.callCount)}</td><td>${escapeHtml(item.successCount || 0)}</td><td>${escapeHtml(item.failedCount || 0)}</td><td>${escapeHtml(formatQuantity(item.usageValue, item.unit))}</td><td>${escapeHtml(formatMoney(item.customerAmount))}</td>${state.actor.role === 'SYSTEM_ADMIN' ? `<td>${escapeHtml(formatMoney(item.costAmount))}</td>` : ''}</tr>`
-    : `<tr><td>${escapeHtml(formatDateTime(item.createdAt))}</td><td>${escapeHtml(item.billingItemId)}</td><td>${escapeHtml(item.configGroupName)}</td><td>${escapeHtml(item.displayName || item.loginName)}</td><td>${modelStatusCell(item)}</td><td>${usageCell(item)}</td><td>${escapeHtml(formatMoney(item.customerAmount))}</td>${state.actor.role === 'SYSTEM_ADMIN' ? `<td>${escapeHtml(formatMoney(item.costAmount))}</td>` : ''}<td>${item.hasAuditPayload ? `<button class="audit-download" data-task-id="${escapeHtml(item.taskId)}" type="button"><span aria-hidden="true">↓</span>${t('common.download')}</button>` : `<span class="muted">${t('common.none')}</span>`}</td></tr>`).join('');
+    : `<tr><td>${escapeHtml(formatDateTime(item.createdAt))}</td><td>${escapeHtml(item.billingItemId)}</td><td>${escapeHtml(item.configGroupName)}</td><td>${escapeHtml(item.displayName || item.loginName)}</td><td>${modelStatusCell(item)}</td><td>${usageCell(item)}</td><td>${escapeHtml(formatMoney(item.customerAmount))}</td>${state.actor.role === 'SYSTEM_ADMIN' ? `<td>${escapeHtml(formatMoney(item.costAmount))}</td>` : ''}<td>${item.hasAuditPayload ? `<button class="audit-download" data-task-id="${escapeHtml(item.taskId)}" type="button" title="${escapeHtml(t('common.download'))}" aria-label="${escapeHtml(t('common.download'))}"><span aria-hidden="true">↓</span></button>` : `<span class="muted">${t('common.none')}</span>`}</td></tr>`).join('');
   const totalPages = Math.max(1, Math.ceil(Number(result.total || 0) / Number(result.pageSize || 50)));
   setText('#model-page', t('pagination.pageOf', { page: result.page, totalPages: totalPages }));
   $('#model-prev').disabled = result.page <= 1;
@@ -1881,6 +1980,35 @@ $('#project-list').addEventListener('click', event => {
 $$('.nav-item').forEach(button => button.addEventListener('click', () => switchSection(button.dataset.section)));
 $('#new-config').addEventListener('click', () => openConfigDialog());
 $('#new-user').addEventListener('click', () => openUserDialog());
+$('#user-group-filter-trigger').addEventListener('click', event => {
+  const menu = $('#user-group-filter-menu');
+  if (menu.classList.contains('hidden')) openUserGroupFilterMenu(event.currentTarget);
+  else closeUserGroupFilterMenu();
+});
+$('#user-group-filter-menu').addEventListener('click', event => {
+  if (!event.target.closest('[data-user-group-filter-clear]')) return;
+  state.userGroupFilter = [];
+  renderUserGroupFilter();
+  renderUsers();
+});
+$('#user-group-filter-menu').addEventListener('change', event => {
+  if (event.target.matches('[data-user-group-filter-all]')) {
+    state.userGroupFilter = [];
+  } else if (event.target.matches('[data-user-group-filter-id]')) {
+    state.userGroupFilter = [...$('#user-group-filter-menu').querySelectorAll('[data-user-group-filter-id]:checked')]
+      .map(input => input.dataset.userGroupFilterId);
+  }
+  renderUserGroupFilter();
+  renderUsers();
+});
+$('#user-settled-sort-asc').addEventListener('click', () => {
+  state.userSettledSort = 'asc';
+  renderUsers();
+});
+$('#user-settled-sort-desc').addEventListener('click', () => {
+  state.userSettledSort = 'desc';
+  renderUsers();
+});
 $('#add-price').addEventListener('click', () => openPriceDialog());
 $('#price-scope-filter').addEventListener('change', event => {
   event.currentTarget.dataset.userSelected = 'true';
@@ -2069,6 +2197,7 @@ $('#user-action-menu').addEventListener('click', event => {
 
 document.addEventListener('click', event => {
   if (!event.target.closest('[data-user-menu], #user-action-menu')) closeUserActionMenu();
+  if (!event.target.closest('#user-group-filter-trigger, #user-group-filter-menu')) closeUserGroupFilterMenu();
 });
 window.addEventListener('resize', closeUserActionMenu);
 window.addEventListener('scroll', closeUserActionMenu, true);

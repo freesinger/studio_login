@@ -47,6 +47,7 @@ npm run dev
 
 ## 使用文档
 
+- [本地部署SOP](doc/local-deployment-requirements.md)：部署 Studio Login 所需资源配置和服务部署操作。
 - [Studio Login 使用手册](doc/user-guide.md)：登录、Studio 连接、资源配置组、子账号、价格、模型统计和账单的日常操作。
 - [Studio 与 studio-login 本地联调测试手册](doc/studio-login-integration-test-manual.md)：本地双服务联调和计费链路验证。
 - [部署币种与时区](doc/deployment-currency-timezone.md)：部署币种、账期时区和金额口径。
