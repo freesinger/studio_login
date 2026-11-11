@@ -635,7 +635,11 @@ export class ConfigGroupService {
     return { version: version.version, synced, failed };
   }
 
-  private async bindingGroups(accountId: string, bindings: UserBindingInput[]): Promise<BindingGroupRow[]> {
+  private async bindingGroups(
+    accountId: string,
+    bindings: UserBindingInput[],
+    retainedGroupIds?: ReadonlySet<string>,
+  ): Promise<BindingGroupRow[]> {
     const ids = bindings.map(binding => binding.configGroupId);
     const placeholders = ids.map(() => '?').join(', ');
     const rows = await this.database.query<BindingGroupRow>(
@@ -650,6 +654,10 @@ export class ConfigGroupService {
     );
     if (rows.length !== ids.length) {
       throw new AppError(message('groups.unavailableOrUnpublished'), 409, 'CONFIG_GROUP_NOT_AVAILABLE');
+    }
+    if (retainedGroupIds && rows.some(row =>
+      this.isReadOnlyProject(row.project_id) && !retainedGroupIds.has(row.config_group_id))) {
+      throw new AppError(message('groups.readOnlySelection'), 403, 'CONFIG_GROUP_READ_ONLY');
     }
     for (const row of rows) {
       if (Number(row.current_version) <= 0) {
@@ -713,9 +721,10 @@ export class ConfigGroupService {
     userId: string;
     loginName: string;
     bindings: UserBindingInput[];
+    groups?: BindingGroupRow[];
   }): Promise<{ synced: number; failed: number; defaultConfigGroupId: string; defaultMonthlyLimit: string | null }> {
     const normalized = normalizeBindings(input);
-    const groups = await this.bindingGroups(input.accountId, normalized);
+    const groups = input.groups ?? await this.bindingGroups(input.accountId, normalized);
     const groupById = new Map(groups.map(group => [group.config_group_id, group]));
     const defaultBinding = normalized.find(binding => binding.isDefault) ?? normalized[0]!;
     const existing = await this.database.query<ExistingUserBindingRow>(
@@ -812,6 +821,7 @@ export class ConfigGroupService {
     monthlyLimit: string | null;
   }): Promise<{ userId: string; status: string }> {
     const bindings = normalizeBindings(input);
+    const groups = await this.bindingGroups(input.accountId, bindings, new Set());
     const defaultBinding = bindings.find(binding => binding.isDefault) ?? bindings[0]!;
     const loginName = input.loginName.trim();
     const passwordHash = await bcrypt.hash(input.password, 12);
@@ -878,6 +888,7 @@ export class ConfigGroupService {
       userId: id,
       loginName,
       bindings,
+      groups,
     });
     await this.database.execute(
       `UPDATE users
@@ -1089,11 +1100,17 @@ export class ConfigGroupService {
     if (!users[0] || users[0].role !== 'SUBACCOUNT') {
       throw new AppError(message('users.notFound'), 404, 'SUBACCOUNT_NOT_FOUND');
     }
+    const bindings = normalizeBindings(input);
+    const existingBindings = await this.database.query<ExistingUserBindingRow>(
+      'SELECT config_group_id FROM user_config_group_bindings WHERE user_id = ?',
+      [input.userId],
+    );
+    const retainedGroupIds = new Set(existingBindings.map(binding => binding.config_group_id));
+    const groups = await this.bindingGroups(input.accountId, bindings, retainedGroupIds);
     const passwordHash = input.password ? await bcrypt.hash(input.password, 12) : null;
     const passwordCipher = input.password
       ? encryptJson(input.password, this.config.encryptionKey)
       : null;
-    const bindings = normalizeBindings(input);
     await this.database.transaction(async tx => {
       await tx.execute(
         `UPDATE users
@@ -1112,6 +1129,7 @@ export class ConfigGroupService {
       userId: input.userId,
       loginName: users[0].login_name,
       bindings,
+      groups,
     });
     await this.database.execute(
       `UPDATE users

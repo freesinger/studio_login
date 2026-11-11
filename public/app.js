@@ -941,9 +941,17 @@ function refreshPriceScopeFilter() {
     : defaultGroup?.configGroupId || '*';
 }
 
+function selectableUserGroups(userId = $('#user-id').value) {
+  const user = state.users.find(user => user.userId === userId);
+  const retainedGroupIds = new Set((user?.bindings || []).map(binding => binding.configGroupId));
+  return state.groups.filter(group =>
+    (!group.readOnly || retainedGroupIds.has(group.configGroupId))
+    && ['AVAILABLE', 'PARTIAL_FAILED'].includes(group.status));
+}
+
 function renderUserBindingCards(bindings = []) {
   const list = $('#user-binding-list');
-  const available = state.groups.filter(group => ['AVAILABLE', 'PARTIAL_FAILED'].includes(group.status));
+  const available = selectableUserGroups();
   const initial = bindings.length ? bindings : [{
     configGroupId: available.find(group => group.isDefault)?.configGroupId || available[0]?.configGroupId || '',
     monthlyLimit: '',
@@ -953,9 +961,14 @@ function renderUserBindingCards(bindings = []) {
 }
 
 function bindingCardHtml(binding, index) {
-  const available = state.groups.filter(group => ['AVAILABLE', 'PARTIAL_FAILED'].includes(group.status));
+  const available = selectableUserGroups();
+  const selected = available.some(group => group.configGroupId === binding.configGroupId);
+  const current = state.groups.find(group => group.configGroupId === binding.configGroupId);
+  const placeholder = current?.readOnly
+    ? `${current.projectId} · ${t('groups.readOnlySelection')}`
+    : t('groups.selectionRequired');
   return `<div class="binding-card" data-binding-card>
-    <label>${t('common.resourceGroup')}<select data-binding-group required>${available.map(group =>
+    <label>${t('common.resourceGroup')}<select data-binding-group required>${selected ? '' : `<option value="" disabled selected>${escapeHtml(placeholder)}</option>`}${available.map(group =>
       `<option value="${escapeHtml(group.configGroupId)}" ${group.configGroupId === binding.configGroupId ? 'selected' : ''}>${escapeHtml(group.projectId)}</option>`).join('')}</select></label>
     <label>${t('quota.subaccountMonthlyLimit', { currency })}<input data-binding-limit inputmode="decimal" placeholder="${t('quota.unlimited')}" value="${escapeHtml(binding.monthlyLimit || '')}"></label>
     <label class="checkbox-row binding-default"><input data-binding-default name="bindingDefault" type="radio" ${binding.isDefault || index === 0 ? 'checked' : ''}><span>${t('common.default')}</span></label>
@@ -968,7 +981,7 @@ function collectUserBindings() {
     configGroupId: card.querySelector('[data-binding-group]').value,
     monthlyLimit: card.querySelector('[data-binding-limit]').value.trim() || null,
     isDefault: card.querySelector('[data-binding-default]').checked,
-  })).filter(binding => binding.configGroupId);
+  }));
 }
 
 function openConfigDialog(group = null) {
@@ -1302,7 +1315,7 @@ function isStrongPassword(value) {
 }
 
 function openUserDialog(user = null) {
-  const available = state.groups.filter(group => ['AVAILABLE', 'PARTIAL_FAILED'].includes(group.status));
+  const available = selectableUserGroups(user?.userId || '');
   if (available.length === 0) {
     toast(t('users.createGroupFirst'), true);
     switchSection('configs');
@@ -2342,8 +2355,7 @@ $('#toggle-user-password').addEventListener('click', () => {
 });
 $('#add-user-binding').addEventListener('click', () => {
   const selectedIds = new Set(collectUserBindings().map(binding => binding.configGroupId));
-  const next = state.groups
-    .filter(group => ['AVAILABLE', 'PARTIAL_FAILED'].includes(group.status))
+  const next = selectableUserGroups()
     .find(group => !selectedIds.has(group.configGroupId));
   const bindings = collectUserBindings();
   bindings.push({ configGroupId: next?.configGroupId || '', monthlyLimit: null, isDefault: bindings.length === 0 });

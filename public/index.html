@@ -189,7 +189,7 @@
         <div id="custom-model-panel" class="form-section"><div class="custom-model-section-header"><div><h3 data-i18n="customModels.optionalTitle">自定义模型配置（可选）</h3><p class="muted" data-i18n="customModels.description">按 Studio 自定义模型配置录入；保存时只写入 customModels，模型类型决定后续调用路径。</p></div><button id="add-custom-model" class="secondary compact" type="button" data-i18n="customModels.add">+ 添加自定义模型</button></div><div id="custom-model-list" class="custom-model-list"></div><div id="custom-model-empty" class="empty compact-empty" data-i18n="customModels.empty">暂未添加自定义模型。</div></div>
       </section>
       <p class="message form-message" aria-live="polite"></p>
-      <div class="dialog-actions"><p id="config-readonly-help" class="muted hidden" data-i18n="groups.readOnlyHelp">该配置组已由部署环境设置为只读。页面和 API 只能查看；如需修改，请直接调整数据库。</p><button class="secondary close-dialog" type="button" data-i18n="common.cancel">取消</button><button id="config-submit" class="primary compact" type="submit" data-i18n="groups.saveAndApply">保存并生效</button></div>
+      <div class="dialog-actions"><p id="config-readonly-help" class="muted hidden" data-i18n="groups.readOnlyHelp">该配置组已由部署环境设置为只读，不再接受新增用户绑定。已有绑定可继续保留和编辑，也可迁移到其他配置组；仍可查看和作为筛选条件。配置组本身如需修改，请直接调整数据库。</p><button class="secondary close-dialog" type="button" data-i18n="common.cancel">取消</button><button id="config-submit" class="primary compact" type="submit" data-i18n="groups.saveAndApply">保存并生效</button></div>
     </form>
   </dialog>
 

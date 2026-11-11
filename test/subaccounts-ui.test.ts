@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { runInNewContext } from 'node:vm';
 
 import { describe, expect, it } from 'vitest';
 
@@ -20,7 +21,81 @@ const submitUserSource = appSource.slice(
   appSource.indexOf('async function setUserStatus('),
 );
 
+function bindingUi(groups: Array<Record<string, unknown>>, existingGroupIds: string[] = []) {
+  const list = { innerHTML: '' };
+  const userId = existingGroupIds.length ? 'usr-existing' : '';
+  const state = { groups, users: [{ userId: 'usr-existing', bindings: existingGroupIds.map(configGroupId => ({ configGroupId })) }] };
+  const source = appSource.slice(
+    appSource.indexOf('function selectableUserGroups('),
+    appSource.indexOf('function openConfigDialog('),
+  ) + appSource.slice(
+    appSource.indexOf('function userGroupOptions('),
+    appSource.indexOf('function renderUserGroupFilter('),
+  );
+  const ui = runInNewContext(`${source}\n({ renderUserBindingCards, userGroupOptions, selectableUserGroups });`, {
+    state,
+    $: (selector: string) => selector === '#user-id' ? { value: userId } : list,
+    t: (key: string) => key,
+    escapeHtml: (value: string) => value,
+    currency: 'USD',
+  }) as {
+    renderUserBindingCards(bindings?: Array<Record<string, unknown>>): void;
+    userGroupOptions(): Array<[string, string]>;
+    selectableUserGroups(userId?: string): Array<Record<string, unknown>>;
+  };
+  return { ui, list };
+}
+
+const lockedGroup = { configGroupId: 'grp-locked', projectId: 'locked-project', status: 'AVAILABLE', readOnly: true, isDefault: true };
+const editableGroup = { configGroupId: 'grp-editable', projectId: 'editable-project', status: 'PARTIAL_FAILED', readOnly: false };
+
 describe('subaccount list UI contract', () => {
+  it('excludes read-only groups from binding choices and default selection but retains filters', () => {
+    const { ui, list } = bindingUi([lockedGroup, editableGroup]);
+    ui.renderUserBindingCards();
+    expect(list.innerHTML).toContain('value="grp-editable" selected');
+    expect(list.innerHTML).not.toContain('value="grp-locked"');
+    expect(ui.userGroupOptions()).toContainEqual(['grp-locked', 'locked-project']);
+    expect(ui.selectableUserGroups()).toEqual([editableGroup]);
+    const addBindingSource = appSource.slice(
+      appSource.indexOf("$('#add-user-binding').addEventListener"),
+      appSource.indexOf("$('#user-binding-list').addEventListener"),
+    );
+    expect(addBindingSource).toContain('selectableUserGroups()');
+  });
+
+  it('preserves the selected read-only binding when editing an existing user', () => {
+    const otherLockedGroup = { ...lockedGroup, configGroupId: 'grp-other-locked' };
+    const { ui, list } = bindingUi([lockedGroup, otherLockedGroup, editableGroup], ['grp-locked']);
+    ui.renderUserBindingCards([{ configGroupId: 'grp-locked', monthlyLimit: '100', isDefault: true }]);
+    expect(list.innerHTML).toContain('value="grp-locked" selected');
+    expect(list.innerHTML).toContain('value="100"');
+    expect(list.innerHTML).not.toContain('groups.readOnlySelection');
+    expect(list.innerHTML).not.toContain('value="grp-editable" selected');
+    expect(list.innerHTML).not.toContain('value="grp-other-locked"');
+    expect(ui.selectableUserGroups('')).toEqual([editableGroup]);
+  });
+
+  it('allows editing an existing binding when only read-only groups remain', () => {
+    const { ui, list } = bindingUi([lockedGroup], ['grp-locked']);
+    ui.renderUserBindingCards([{ configGroupId: 'grp-locked', monthlyLimit: '100', isDefault: true }]);
+    expect(list.innerHTML).toContain('value="grp-locked" selected');
+    expect(list.innerHTML).not.toContain('<option value=""');
+  });
+
+  it('does not offer the old group after an existing user has migrated', () => {
+    const { ui } = bindingUi([lockedGroup, editableGroup], ['grp-editable']);
+    expect(ui.selectableUserGroups()).toEqual([editableGroup]);
+  });
+
+  it('has no assignable group when all groups are read-only', () => {
+    const { ui, list } = bindingUi([lockedGroup]);
+    ui.renderUserBindingCards();
+    expect(list.innerHTML).toContain('<option value="" disabled selected>groups.selectionRequired</option>');
+    expect(list.innerHTML).not.toContain('value="grp-locked"');
+    expect(ui.userGroupOptions()).toEqual([['grp-locked', 'locked-project']]);
+  });
+
   it('supports multi-select config-group filtering and settled amount sorting', () => {
     expect(html).toContain('id="user-group-filter-trigger"');
     expect(html).toContain('id="user-group-filter-menu"');

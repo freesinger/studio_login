@@ -17,6 +17,7 @@ import { message, formatValidationIssues, requestLocale, translate, type Localiz
 import { AuthService, SESSION_COOKIE_NAME } from './auth.js';
 import { CaptchaService } from './captcha.js';
 import {
+  baselineProjectId,
   BillingService,
   type BaselineCallbackInput,
   type BaselinePrecheckInput,
@@ -1360,6 +1361,8 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
       appId,
       token,
       body.UserId,
+      undefined,
+      baselineProjectId(body),
     )) {
       throw new AppError(message('errors.studioUnauthorized'), 401, 'STUDIO_UNAUTHORIZED');
     }
@@ -1388,6 +1391,7 @@ export async function buildApp(dependencies: AppDependencies): Promise<FastifyIn
       token,
       body.UserId,
       body.RequestId,
+      baselineProjectId(body),
     )) {
       throw new AppError(message('errors.studioUnauthorized'), 401, 'STUDIO_UNAUTHORIZED');
     }

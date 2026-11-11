@@ -289,6 +289,7 @@ export interface MessageParameters {
   'groups.readOnlyBadge': Record<string, never>;
   'groups.readOnlyHelp': Record<string, never>;
   'groups.readOnly': Record<string, never>;
+  'groups.readOnlySelection': Record<string, never>;
   'groups.setDefault': Record<string, never>;
   'groups.requiredSettings': Record<string, never>;
   'groups.fullSettings': Record<string, never>;

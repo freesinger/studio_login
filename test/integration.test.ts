@@ -68,6 +68,35 @@ async function configureStudio(cookie: string) {
   });
 }
 
+async function multiProjectBillingFixture(sharedKey = false) {
+  const adminCookie = await login('acc_demo', 'root', 'StrongPass123!');
+  const connection = await configureStudio(adminCookie);
+  expect(connection.statusCode, connection.body).toBe(200);
+  const connectionId = connection.json().connection.connectionId as string;
+  const keys = ['las-project-first', sharedKey ? 'las-project-first' : 'las-project-second'];
+  const groupIds: string[] = [];
+  for (const [index, projectId] of ['billing-first', 'billing-second'].entries()) {
+    const group = await app.inject({
+      method: 'POST', url: '/api/admin/config-groups', headers: { cookie: adminCookie },
+      payload: {
+        accountId: 'acc_demo', connectionId, projectId, name: projectId,
+        resourceConfig: { lasApiKey: keys[index], arkApiKey: 'ark-fixture', tosBucketName: 'billing-fixture' },
+      },
+    });
+    expect(group.statusCode, group.body).toBe(200);
+    groupIds.push(group.json().configGroupId as string);
+  }
+  const user = await app.inject({
+    method: 'POST', url: '/api/admin/subaccounts', headers: { cookie: adminCookie },
+    payload: {
+      accountId: 'acc_demo', loginName: 'multi-project', displayName: 'Multi Project', password: 'StrongPass123!',
+      configGroupBindings: groupIds.map((configGroupId, index) => ({ configGroupId, isDefault: index === 0 })),
+    },
+  });
+  expect(user.statusCode, user.body).toBe(200);
+  return { adminCookie, connectionId, groupIds, keys };
+}
+
 beforeAll(async () => {
   studioServer = createServer((request, response) => {
     const chunks: Buffer[] = [];
@@ -175,6 +204,101 @@ afterAll(async () => {
 });
 
 describe('studio-login MVP', () => {
+  it('authenticates each bound Project and preserves task keys after rotation', async () => {
+    const { adminCookie, connectionId, groupIds, keys } = await multiProjectBillingFixture();
+    const url = `/api/studio/baseline/tasks?connection_id=${connectionId}`;
+    const headers = { 'x-app-id': 'acc_demo', 'x-las-api-key': keys[1]! };
+    const items = [{ BillingItemId: 'video-second', Unit: 'second', Usage: 1,
+      BillingContext: JSON.stringify({ extensions: { project_id: 'billing-second' } }),
+    }];
+    const precheck = await app.inject({ method: 'POST', url, headers,
+      payload: { RequestId: 'multi-project-context', UserId: 'multi-project', Items: items },
+    });
+    expect(precheck.statusCode, precheck.body).toBe(200);
+    const [task] = await database.query<any>(
+      'SELECT config_group_id FROM studio_tasks WHERE request_id = ?', ['multi-project-context'],
+    );
+    expect(task.config_group_id).toBe(groupIds[1]);
+    const firstProject = await app.inject({ method: 'POST', url,
+      headers: { ...headers, 'x-las-api-key': keys[0]! },
+      payload: { RequestId: 'multi-project-first', UserId: 'multi-project', ProjectId: 'billing-first',
+        Items: [{ BillingItemId: 'video-second', Unit: 'second', Usage: 1 }],
+      },
+    });
+    expect(firstProject.statusCode, firstProject.body).toBe(200);
+
+    for (const [requestId, projectId, key] of [
+      ['wrong-project-key', 'billing-second', keys[0]!],
+      ['unbound-project', 'unbound', keys[1]!],
+      ['unknown-key', 'billing-second', 'las-unknown'],
+      ['empty-key', 'billing-second', '   '],
+    ]) {
+      const rejected = await app.inject({ method: 'POST', url,
+        headers: { ...headers, 'x-las-api-key': key! },
+        payload: { RequestId: requestId, UserId: 'multi-project', ProjectId: projectId,
+          Items: [{ BillingItemId: 'video-second', Unit: 'second', Usage: 1 }],
+        },
+      });
+      expect(rejected.statusCode, rejected.body).toBe(401);
+      expect(rejected.json().code).toBe('STUDIO_UNAUTHORIZED');
+    }
+
+    for (const projectId of [undefined, 'billing-second']) {
+      const accepted = await app.inject({ method: 'POST', url, headers,
+        payload: { RequestId: `multi-project-legacy-${projectId ?? 'key'}`, UserId: 'multi-project', ProjectId: projectId,
+          Items: [{ BillingItemId: 'video-second', Unit: 'second', Usage: 1 }],
+        },
+      });
+      expect(accepted.statusCode, accepted.body).toBe(200);
+      const [legacyTask] = await database.query<any>(
+        'SELECT config_group_id FROM studio_tasks WHERE request_id = ?',
+        [`multi-project-legacy-${projectId ?? 'key'}`],
+      );
+      expect(legacyTask.config_group_id).toBe(groupIds[1]);
+    }
+
+    const callbackUrl = `/api/studio/baseline/tasks/callback?connection_id=${connectionId}`;
+    const missingTask = await app.inject({ method: 'POST', url: callbackUrl, headers,
+      payload: { RequestId: 'multi-project-no-precheck', UserId: 'multi-project', Status: 'FAILED', Items: items },
+    });
+    expect(missingTask.statusCode, missingTask.body).toBe(200);
+    const wrongProjectCallback = await app.inject({ method: 'POST', url: callbackUrl,
+      headers: { ...headers, 'x-las-api-key': keys[0]! },
+      payload: { RequestId: 'multi-project-no-precheck', UserId: 'multi-project', Status: 'FAILED', Items: items },
+    });
+    expect(wrongProjectCallback.statusCode).toBe(401);
+
+    const rotated = await app.inject({ method: 'PUT', url: `/api/admin/config-groups/${groupIds[1]}`,
+      headers: { cookie: adminCookie }, payload: { accountId: 'acc_demo', resourceConfig: { lasApiKey: 'las-project-rotated' } },
+    });
+    expect(rotated.statusCode, rotated.body).toBe(200);
+    const callbackPayload = { RequestId: 'multi-project-context', UserId: 'multi-project', Status: 'SUCCEEDED', Items: items };
+    const currentKeyCallback = await app.inject({ method: 'POST', url: callbackUrl,
+      headers: { ...headers, 'x-las-api-key': 'las-project-rotated' }, payload: callbackPayload,
+    });
+    expect(currentKeyCallback.statusCode).toBe(401);
+    const historicalKeyCallback = await app.inject({ method: 'POST', url: callbackUrl, headers, payload: callbackPayload });
+    expect(historicalKeyCallback.statusCode, historicalKeyCallback.body).toBe(200);
+  }, 20_000);
+
+  it('requires a Project for legacy reports when bound Projects share a key', async () => {
+    const { connectionId, groupIds, keys } = await multiProjectBillingFixture(true);
+    const url = `/api/studio/baseline/tasks?connection_id=${connectionId}`;
+    const headers = { 'x-app-id': 'acc_demo', 'x-las-api-key': keys[0]! };
+    const payload = { RequestId: 'shared-key', UserId: 'multi-project',
+      Items: [{ BillingItemId: 'video-second', Unit: 'second', Usage: 1 }],
+    };
+    const ambiguous = await app.inject({ method: 'POST', url, headers, payload });
+    expect(ambiguous.statusCode, ambiguous.body).toBe(409);
+    expect(ambiguous.json().code).toBe('BILLING_CONFIG_GROUP_AMBIGUOUS');
+    const accepted = await app.inject({ method: 'POST', url, headers,
+      payload: { ...payload, ProjectId: 'billing-second' },
+    });
+    expect(accepted.statusCode, accepted.body).toBe(200);
+    const [task] = await database.query<any>('SELECT config_group_id FROM studio_tasks WHERE request_id = ?', ['shared-key']);
+    expect(task.config_group_id).toBe(groupIds[1]);
+  }, 20_000);
+
   it('upgrades only legacy zero-priced platform Seed defaults on startup', async () => {
     const [{ user_id: adminId }] = await database.query<any>(
       "SELECT user_id FROM users WHERE login_name = 'root' LIMIT 1",

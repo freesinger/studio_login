@@ -547,16 +547,19 @@ export class StudioConnectionService {
     supplied: string,
     loginName: string,
     requestId?: string,
+    projectId?: string,
   ): Promise<boolean> {
-    if (!connectionId || appId !== this.config.STUDIO_LOGIN_ACCOUNT_ID || !supplied || !loginName) {
+    const normalizedKey = supplied.trim();
+    if (!connectionId || appId !== this.config.STUDIO_LOGIN_ACCOUNT_ID || !normalizedKey || !loginName) {
       return false;
     }
-    const lasApiKey = requestId
-      ? await this.resourceLasApiKeyForTaskByLoginName(connectionId, appId, loginName, requestId)
-        ?? await this.resourceLasApiKeyForUser(connectionId, appId, loginName)
-      : await this.resourceLasApiKeyForUser(connectionId, appId, loginName);
-    if (!lasApiKey) return false;
-    return equalSecret(lasApiKey, supplied.trim());
+    if (requestId) {
+      const taskKey = await this.resourceLasApiKeyForTaskByLoginName(connectionId, appId, loginName, requestId);
+      // A task keeps the key from its submitted configuration version after rotation.
+      if (taskKey !== null) return equalSecret(taskKey, normalizedKey);
+    }
+    const keys = await this.resourceLasApiKeysForUser(connectionId, appId, loginName, projectId);
+    return keys.some(key => equalSecret(key, normalizedKey));
   }
 
   async usageQueryTarget(
@@ -755,12 +758,14 @@ export class StudioConnectionService {
     });
   }
 
-  private async resourceLasApiKeyForUser(
+  private async resourceLasApiKeysForUser(
     connectionId: string,
     appId: string,
     loginName: string,
-  ): Promise<string | null> {
-    return this.resourceLasApiKeyFromQuery(
+    projectId?: string,
+  ): Promise<string[]> {
+    // Legacy reports without a Project are matched by key; billing resolves ambiguity.
+    const rows = await this.database.query<{ encrypted_config: string } & RowDataPacket>(
       `SELECT v.encrypted_config
          FROM users u
          JOIN user_config_group_bindings b ON b.user_id = u.user_id
@@ -770,9 +775,11 @@ export class StudioConnectionService {
           AND v.version = g.current_version
         WHERE r.connection_id = ? AND r.app_id = ? AND u.login_name = ? AND u.status = 'ACTIVE'
           AND g.status IN ('AVAILABLE', 'PARTIAL_FAILED')
-        LIMIT 1`,
-      [connectionId, appId, loginName],
+          ${projectId ? 'AND g.project_id = ?' : ''}`,
+      projectId ? [connectionId, appId, loginName, projectId] : [connectionId, appId, loginName],
     );
+    return rows.map(row => decryptJson<ResourceConfig>(row.encrypted_config, this.config.encryptionKey).lasApiKey?.trim())
+      .filter((key): key is string => Boolean(key));
   }
 
   private async resourceLasApiKeyForTaskByLoginName(
